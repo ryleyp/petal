@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#1b1430" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Petal" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <title>Petal — Period & Patch Tracker</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+
+  <!-- ============ LOCK SCREEN ============ -->
+  <div id="lock" class="lock">
+    <div class="lock-card">
+      <div class="logo">🌸</div>
+      <h1>Petal</h1>
+      <p class="lock-sub" id="lockSub">Enter your passcode to unlock</p>
+      <form id="lockForm" autocomplete="off">
+        <input id="pass1" class="pass-input" type="password" inputmode="numeric"
+               placeholder="Passcode" autocomplete="off" />
+        <input id="pass2" class="pass-input hidden" type="password" inputmode="numeric"
+               placeholder="Confirm passcode" autocomplete="off" />
+        <p id="lockError" class="lock-error"></p>
+        <button id="lockBtn" type="submit" class="btn btn-primary">Unlock</button>
+      </form>
+      <p class="lock-note" id="lockNote">
+        Your data is encrypted on this device. There is no recovery if you forget
+        your passcode — choose something memorable.
+      </p>
+      <button id="resetAll" class="link-btn hidden">Erase all data &amp; start over</button>
+    </div>
+  </div>
+
+  <!-- ============ APP ============ -->
+  <div id="app" class="app hidden">
+    <header class="topbar">
+      <span class="brand">🌸 Petal</span>
+      <button id="lockNow" class="icon-btn" title="Lock now" aria-label="Lock now">🔒</button>
+    </header>
+
+    <main id="views">
+      <!-- TODAY -->
+      <section id="view-today" class="view">
+        <div class="ring-wrap">
+          <div id="cycleRing" class="ring"></div>
+          <div class="ring-center">
+            <div class="hero-day" id="heroDay">—</div>
+            <div class="hero-label" id="heroLabel">Loading…</div>
+          </div>
+        </div>
+        <div class="hero-sub" id="heroSub"></div>
+
+        <div id="alerts"></div>
+
+        <div class="quick-actions">
+          <button class="qa" data-quick="period-start">🩸 Period started</button>
+          <button class="qa" data-quick="period-end">✅ Period ended</button>
+          <button class="qa" data-quick="patch-applied">🩹 Applied patch</button>
+          <button class="qa" data-quick="patch-removed">🌙 Removed patch</button>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Today</h2><span class="muted" id="todayDate"></span></div>
+          <div class="log-row">
+            <label>Flow</label>
+            <div class="seg" id="flowSeg" data-field="flow">
+              <button data-val="">None</button>
+              <button data-val="spotting">Spotting</button>
+              <button data-val="light">Light</button>
+              <button data-val="medium">Medium</button>
+              <button data-val="heavy">Heavy</button>
+            </div>
+          </div>
+          <div class="log-row">
+            <label>Symptoms</label>
+            <div class="chips" id="symptomChips"></div>
+          </div>
+          <div class="log-row">
+            <label>Notes</label>
+            <textarea id="todayNotes" rows="2" placeholder="Anything you want to remember…"></textarea>
+          </div>
+          <button id="saveToday" class="btn btn-primary full">Save today</button>
+        </div>
+      </section>
+
+      <!-- CALENDAR -->
+      <section id="view-calendar" class="view hidden">
+        <div class="cal-head">
+          <button id="calPrev" class="icon-btn">‹</button>
+          <h2 id="calTitle">—</h2>
+          <button id="calNext" class="icon-btn">›</button>
+        </div>
+        <div class="cal-weekdays">
+          <span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span>
+        </div>
+        <div id="calGrid" class="cal-grid"></div>
+        <div class="legend">
+          <span><i class="dot period"></i>Period</span>
+          <span><i class="dot predicted"></i>Predicted</span>
+          <span><i class="dot fertile"></i>Fertile</span>
+          <span><i class="dot ovul"></i>Ovulation</span>
+          <span><i class="dot patch"></i>Patch on</span>
+          <span><i class="dot patchfree"></i>Patch-free</span>
+        </div>
+        <div id="dayDetail" class="card hidden"></div>
+      </section>
+
+      <!-- PATCH -->
+      <section id="view-patch" class="view hidden">
+        <div id="patchStatusCard"></div>
+
+        <div class="card">
+          <div class="card-head"><h2>“What if I’m off-schedule?”</h2></div>
+          <p class="muted small">Honest answers, before or after it happens. The only patch mistake
+            that raises pregnancy risk is going <b>more than 7 days with no hormones</b> — so a late
+            weekly change under 48h, or leaving a patch on too long, usually keeps you protected.</p>
+          <div class="helper-btns">
+            <button class="btn btn-ghost" data-help="change1">Weekly change &lt;48h late</button>
+            <button class="btn btn-ghost" data-help="change2">Weekly change ≥48h late</button>
+            <button class="btn btn-ghost" data-help="newcycle">Late starting a new patch</button>
+            <button class="btn btn-ghost" data-help="lefton">Forgot to remove (left on)</button>
+            <button class="btn btn-ghost" data-help="detach1">Fell off &lt;24h</button>
+            <button class="btn btn-ghost" data-help="detach2">Fell off ≥24h / unsure</button>
+          </div>
+          <div id="helperResult"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Patch schedule</h2></div>
+          <p class="muted small">The combined patch runs in a 28-day cycle: a new patch each
+            week for 3 weeks, then a patch-free week (withdrawal bleed). Set the date you applied
+            the first patch of your current cycle.</p>
+          <div class="log-row">
+            <label>First patch applied</label>
+            <input id="patchStart" type="date" />
+          </div>
+          <div class="log-row">
+            <label>Remind me at</label>
+            <input id="reminderTime" type="time" value="09:00" />
+          </div>
+          <button id="savePatch" class="btn btn-primary full">Save schedule</button>
+        </div>
+
+        <div class="card" id="patchScheduleCard">
+          <div class="card-head"><h2>Upcoming patch events</h2></div>
+          <div id="patchSchedule" class="schedule"></div>
+          <button id="exportIcs" class="btn btn-ghost full">📅 Add reminders to my Calendar (.ics)</button>
+          <p class="muted small center">The calendar export is the most reliable way to get
+            alarms on your phone — notifications only fire while the app is open.</p>
+        </div>
+      </section>
+
+      <!-- INSIGHTS -->
+      <section id="view-insights" class="view hidden">
+        <div class="card">
+          <div class="card-head"><h2>Your cycle</h2></div>
+          <div id="insights" class="insights"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Ovulation &amp; fertility</h2></div>
+          <div id="ovulationInsight"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>History</h2></div>
+          <div id="history" class="history"></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section id="view-settings" class="view hidden">
+        <div class="card">
+          <div class="card-head"><h2>Cycle settings</h2></div>
+          <div class="log-row">
+            <label>Average cycle length (days)</label>
+            <input id="cycleLen" type="number" min="20" max="45" value="28" />
+          </div>
+          <div class="log-row">
+            <label>Luteal phase (days)</label>
+            <input id="lutealLen" type="number" min="10" max="16" value="14" />
+          </div>
+          <label class="switch-row">
+            <span>Currently using the patch</span>
+            <input id="onPatch" type="checkbox" />
+          </label>
+          <button id="saveSettings" class="btn btn-primary full">Save settings</button>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2>Security &amp; data</h2></div>
+          <button id="changePass" class="btn btn-ghost full">Change passcode</button>
+          <button id="exportData" class="btn btn-ghost full">Export encrypted backup</button>
+          <label class="btn btn-ghost full file-label">
+            Import backup<input id="importData" type="file" accept=".json,application/json" hidden />
+          </label>
+          <button id="eraseData" class="btn btn-danger full">Erase all data</button>
+          <p class="muted small">Your data is stored <b>only on this device</b>, encrypted with your
+            passcode (AES-256). Nothing is ever sent to any server.</p>
+          <p class="muted small"><b>What this protects:</b> someone who gets your phone or a backup
+            file can't read your data without the passcode. <b>What it can't protect against:</b>
+            anyone who knows or can compel your passcode, or sees the app already unlocked. Use a
+            passcode different from your phone PIN, and lock the app when you're done.</p>
+          <p class="muted small"><b>To keep a year+ of data safe from being wiped:</b> tap “Export
+            encrypted backup”, then in the Share/Save sheet choose <b>Save to Files → iCloud Drive</b>.
+            The file is already encrypted, so even iCloud can't read it. Restore anytime with “Import backup”.</p>
+        </div>
+        <p class="disclaimer">Petal is for personal tracking only and is not medical advice
+          or a contraceptive guarantee. Predictions are estimates. Follow your patch's
+          instructions and talk to a clinician with any concerns.</p>
+      </section>
+    </main>
+
+    <!-- TAB BAR -->
+    <nav class="tabbar">
+      <button class="tab active" data-view="today"><span>🏠</span>Today</button>
+      <button class="tab" data-view="calendar"><span>📆</span>Calendar</button>
+      <button class="tab" data-view="patch"><span>🩹</span>Patch</button>
+      <button class="tab" data-view="insights"><span>📊</span>Insights</button>
+      <button class="tab" data-view="settings"><span>⚙️</span>Settings</button>
+    </nav>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="./app.js"></script>
+</body>
+</html>
