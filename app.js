@@ -642,21 +642,26 @@ $('.quick-actions').addEventListener('click', (e) => {
   if (q === 'patch-removed') removePatchToday();
 });
 
-function applyPatchToday() {
-  // If no schedule yet, this becomes the cycle anchor.
-  if (!state.settings.patchStart) {
-    state.settings.patchStart = todayISO();
+function applyPatchToday() { logPatchActionOn(todayISO(), 'apply'); }
+function removePatchToday() { logPatchActionOn(todayISO(), 'remove'); }
+
+// Log a patch apply/remove for any date (today or retroactive).
+function logPatchActionOn(ds, action) {
+  // If there's no schedule yet, the first applied patch anchors the cycle.
+  if (action === 'apply' && !state.settings.patchStart) {
+    state.settings.patchStart = ds;
     state.settings.onPatch = true;
   }
-  recordPatchAction('apply');
+  recordPatchAction(action, ds);
   saveState(); hydrateSettings(); renderAll();
-  flashAssessment('Patch applied 🩹');
+  flashAssessment(action === 'apply' ? 'Patch applied 🩹' : 'Patch removed 🌙');
 }
-function removePatchToday() {
-  recordPatchAction('remove');
-  saveState(); renderAll();
-  flashAssessment('Patch removed 🌙');
+// Remove logged patch action(s) on a given date (to fix a mistake).
+function unlogPatchActionOn(ds, action) {
+  state.patchActions = (state.patchActions || []).filter((a) => !(a.date === ds && a.action === action));
+  saveState(); renderAll(); toast('Removed log');
 }
+function patchActionsOn(ds) { return (state.patchActions || []).filter((a) => a.date === ds); }
 // after a patch action, toast a short honest status if anything needs attention
 function flashAssessment(fallback) {
   const a = assessPatch();
@@ -713,6 +718,11 @@ function showDayDetail(ds) {
   if (info.fertile) tags.push('🟢 Fertile window');
   if (info.patch) tags.push('🩹 Patch on');
   if (info.patchfree) tags.push('🌙 Patch-free');
+  const acts = patchActionsOn(ds);
+  const appliedHere = acts.some((a) => a.action === 'apply');
+  const removedHere = acts.some((a) => a.action === 'remove' || a.action === 'detached');
+  if (appliedHere) tags.push('🩹 Applied (logged)');
+  if (removedHere) tags.push('🌙 Removed (logged)');
   const flows = [['', 'None'], ['spotting', 'Spotting'], ['light', 'Light'], ['medium', 'Medium'], ['heavy', 'Heavy']];
   const box = $('#dayDetail'); box.classList.remove('hidden');
   box.innerHTML = `
@@ -728,6 +738,12 @@ function showDayDetail(ds) {
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
       <button class="btn btn-ghost" data-act="ps" style="flex:1">🩸 Period started</button>
       <button class="btn btn-ghost" data-act="pe" style="flex:1">✅ Period ended</button>
+    </div>
+    <div class="log-row" style="margin-top:8px"><label>Patch (log for this day)</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost" data-act="${appliedHere ? 'unapply' : 'apply'}" style="flex:1">${appliedHere ? '✕ Undo applied' : '🩹 Applied patch'}</button>
+        <button class="btn btn-ghost" data-act="${removedHere ? 'unremove' : 'remove'}" style="flex:1">${removedHere ? '✕ Undo removed' : '🌙 Removed patch'}</button>
+      </div>
     </div>`;
   box.querySelector('#dFlow').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
@@ -747,6 +763,16 @@ function showDayDetail(ds) {
   });
   box.querySelector('[data-act="ps"]').addEventListener('click', () => { startPeriod(ds); showDayDetail(ds); });
   box.querySelector('[data-act="pe"]').addEventListener('click', () => { endPeriod(ds); showDayDetail(ds); });
+  box.querySelector('[data-act^="apply"],[data-act^="unapply"]').addEventListener('click', (e) => {
+    const act = e.currentTarget.dataset.act;
+    if (act === 'apply') logPatchActionOn(ds, 'apply'); else unlogPatchActionOn(ds, 'apply');
+    showDayDetail(ds);
+  });
+  box.querySelector('[data-act^="remove"],[data-act^="unremove"]').addEventListener('click', (e) => {
+    const act = e.currentTarget.dataset.act;
+    if (act === 'remove') logPatchActionOn(ds, 'remove'); else unlogPatchActionOn(ds, 'remove');
+    showDayDetail(ds);
+  });
 }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
