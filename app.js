@@ -409,6 +409,41 @@ function assessPatch() {
   return null;
 }
 
+/* Walk the logged patch actions and rate each one on time / late, from the real
+ * gaps between events (the 7-day rule) — never self-labeled. Returns newest first. */
+function patchHistory() {
+  const acts = sortedActions();
+  const out = [];
+  let prev = null;
+  for (const a of acts) {
+    let status = 'ok', note = '';
+    if (a.action === 'detached') {
+      const gap = prev ? daysBetween(prev.date, a.date) : 0;
+      status = 'caution'; note = 'Patch fell off';
+    } else if (a.action === 'remove') {
+      const gap = prev && prev.action === 'apply' ? daysBetween(prev.date, a.date) : null;
+      if (gap === null) { note = 'Removed'; }
+      else if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Removed on time (7d worn)' : `Removed after ${gap}d`; }
+      else { status = 'ok'; note = `Removed ${gap - 7}d late — still protected`; }
+    } else { // apply
+      if (!prev) { status = 'ok'; note = 'Cycle start'; }
+      else if (prev.action === 'apply') { // weekly change
+        const gap = daysBetween(prev.date, a.date);
+        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed early (${gap}d)`; }
+        else if (gap < 9) { status = 'caution'; note = `Changed ${gap - 7}d late (<48h) — still protected`; }
+        else { status = 'risk'; note = `Changed ${gap - 7}d late (≥48h) — protection reduced`; }
+      } else { // apply after a remove/detach = start of a new cycle
+        const gap = daysBetween(prev.date, a.date);
+        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'New patch on time' : `Patch-free ${gap}d, new patch on`; }
+        else { status = 'risk'; note = `Hormone-free ${gap}d (>7) — ovulation risk`; }
+      }
+    }
+    out.push({ date: a.date, action: a.action, status, note });
+    prev = a;
+  }
+  return out.reverse();
+}
+
 /* ============================================================ Day info ==== */
 function dayInfo(dateStr) {
   const info = { period: false, predicted: false, fertile: false, ovul: false,
@@ -483,9 +518,9 @@ function drawCycleRing() {
       arcs += `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="1.6" fill="#1b1430"/>`;
     });
   } else {
-    total = state.settings.cycleLen || 28;
-    const step = 360 / total;
     const s = cycleStats();
+    total = s.avgCycle || state.settings.cycleLen || 28; // data-driven average when available
+    const step = 360 / total;
     const raw = s.lastStart ? daysBetween(s.lastStart, tISO) : null;
     cd = raw === null ? null : ((raw % total) + total) % total;
     arcs += ringArc(r, 0, 360, C.track, w); // base track
@@ -688,6 +723,10 @@ function renderCalendar() {
     if (info.period) cls.push('period-bg');
     else if (info.patchfree) cls.push('patchfree-bg');
     const marks = [];
+    // logged patch actions first (your real history), shown as ringed dots
+    const acts = patchActionsOn(ds);
+    if (acts.some((a) => a.action === 'apply')) marks.push('act-apply');
+    if (acts.some((a) => a.action === 'remove' || a.action === 'detached')) marks.push('act-remove');
     if (info.period) marks.push('period');
     if (info.predicted) marks.push('predicted');
     if (info.fertile) marks.push('fertile');
@@ -871,7 +910,23 @@ function renderInsights() {
     }
   }
 
-  // history
+  // patch history (on time / late, derived from logged dates)
+  const ph = $('#patchHistory'); ph.innerHTML = '';
+  const STATUS_ICON = { ok: '✅', caution: '⚠️', risk: '⚠️' };
+  const STATUS_COLOR = { ok: 'var(--ok)', caution: 'var(--patch)', risk: 'var(--accent)' };
+  const hist = patchHistory();
+  if (!hist.length) {
+    ph.innerHTML = '<p class="muted small">No patch actions logged yet. Tap a day on the Calendar to log when you applied or removed a patch.</p>';
+  } else {
+    hist.slice(0, 20).forEach((e) => {
+      const verb = e.action === 'apply' ? '🩹 Applied' : (e.action === 'detached' ? '🩹 Fell off' : '🌙 Removed');
+      ph.insertAdjacentHTML('beforeend',
+        `<div class="h-item"><span>${verb} · ${fmtDate(e.date)}</span>` +
+        `<span style="color:${STATUS_COLOR[e.status]}">${STATUS_ICON[e.status]} ${e.note}</span></div>`);
+    });
+  }
+
+  // period history
   const h = $('#history'); h.innerHTML = '';
   const ps = sortedPeriods().slice().reverse();
   if (!ps.length) { h.innerHTML = '<p class="muted small">No periods logged yet.</p>'; }

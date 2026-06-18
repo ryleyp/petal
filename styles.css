@@ -156,12 +156,17 @@ main#views { flex: 1; padding: 12px 16px calc(96px + var(--safe-bot)); max-width
 .mark.patch { background: var(--patch); }
 .mark.patchfree { background: var(--patchfree); }
 .mark.note { background: var(--text); opacity: 0.6; }
+/* logged patch actions: ringed dots so real history stands out from the predicted schedule */
+.mark.act-apply { background: var(--patch); box-shadow: 0 0 0 1.5px var(--text); }
+.mark.act-remove { background: var(--patchfree); box-shadow: 0 0 0 1.5px var(--text); }
 .cal-cell.period-bg { background: rgba(255,93,143,0.22); }
 .cal-cell.patchfree-bg { background: rgba(138,123,191,0.18); }
 .legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; font-size: 12px; color: var(--muted); align-items: center; }
 .legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
 .dot.period { background: var(--period); } .dot.predicted { background: var(--predicted); }
 .dot.fertile { background: var(--fertile); } .dot.ovul { background: var(--ovul); }
+.dot.act-apply { background: var(--patch); box-shadow: 0 0 0 1.5px var(--text); }
+.dot.act-remove { background: var(--patchfree); box-shadow: 0 0 0 1.5px var(--text); }
 .dot.patch { background: var(--patch); } .dot.patchfree { background: var(--patchfree); }
 
 /* ---------- Schedule / insights / history ---------- */

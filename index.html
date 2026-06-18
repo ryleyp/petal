@@ -107,6 +107,8 @@
           <span><i class="dot ovul"></i>Ovulation</span>
           <span><i class="dot patch"></i>Patch on</span>
           <span><i class="dot patchfree"></i>Patch-free</span>
+          <span><i class="dot act-apply"></i>Logged on</span>
+          <span><i class="dot act-remove"></i>Logged off</span>
         </div>
         <div id="dayDetail" class="card hidden"></div>
       </section>
@@ -167,7 +169,11 @@
           <div id="ovulationInsight"></div>
         </div>
         <div class="card">
-          <div class="card-head"><h2>History</h2></div>
+          <div class="card-head"><h2>Patch history</h2></div>
+          <div id="patchHistory" class="history"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Period history</h2></div>
           <div id="history" class="history"></div>
         </div>
       </section>
@@ -177,8 +183,10 @@
         <div class="card">
           <div class="card-head"><h2>Cycle settings</h2></div>
           <div class="log-row">
-            <label>Average cycle length (days)</label>
+            <label>Starting cycle length (days)</label>
             <input id="cycleLen" type="number" min="20" max="45" value="28" />
+            <p class="muted small" style="margin:6px 0 0">Just a starting guess. Once you've logged
+              a couple of periods, Petal predicts from your real average instead.</p>
           </div>
           <div class="log-row">
             <label>Luteal phase (days)</label>
