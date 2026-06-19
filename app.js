@@ -1013,7 +1013,7 @@ $$('.tab').forEach((t) => t.addEventListener('click', () => {
   const view = t.dataset.view;
   $$('.view').forEach((v) => v.classList.add('hidden'));
   $(`#view-${view}`).classList.remove('hidden');
-  window.scrollTo(0, 0);
+  const v = $('#views'); if (v) v.scrollTop = 0;
 }));
 
 /* ============================================================ Reminders ==== */

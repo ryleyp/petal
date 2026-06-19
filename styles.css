@@ -26,7 +26,9 @@ body {
   background: linear-gradient(160deg, var(--bg), var(--bg2));
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
-  overscroll-behavior-y: none;
+  overscroll-behavior: none;
+  overflow: hidden;            /* page itself never scrolls; only #views does */
+  position: fixed; width: 100%;
 }
 .hidden { display: none !important; }
 .muted { color: var(--muted); }
@@ -54,18 +56,24 @@ body {
 .link-btn { background: none; border: none; color: var(--accent); margin-top: 14px; font-size: 13px; }
 
 /* ---------- App layout ---------- */
-.app { display: flex; flex-direction: column; min-height: 100%; }
+/* Full-height flex app: header and tab bar are fixed-size rails, only #views
+   scrolls. This keeps the bottom bar perfectly still during momentum scroll. */
+.app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 .topbar {
-  position: sticky; top: 0; z-index: 10;
+  flex: 0 0 auto; z-index: 10;
   display: flex; align-items: center; justify-content: space-between;
   padding: calc(10px + var(--safe-top)) 16px 10px;
   background: rgba(27,20,48,0.85); backdrop-filter: blur(10px);
 }
 .brand { font-weight: 700; font-size: 18px; }
-main#views { flex: 1; padding: 12px 16px calc(96px + var(--safe-bot)); max-width: 560px; margin: 0 auto; width: 100%; }
+main#views {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 12px 16px 20px; max-width: 560px; margin: 0 auto; width: 100%;
+}
 
 .tabbar {
-  position: fixed; bottom: 0; left: 0; right: 0; z-index: 20;
+  flex: 0 0 auto; z-index: 20;
   display: flex; background: rgba(27,20,48,0.95); backdrop-filter: blur(14px);
   border-top: 1px solid #392a63; padding-bottom: var(--safe-bot);
 }
@@ -121,7 +129,9 @@ main#views { flex: 1; padding: 12px 16px calc(96px + var(--safe-bot)); max-width
 
 /* ---------- Quick actions ---------- */
 .quick-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
-.qa { background: var(--card2); border: none; color: var(--text); border-radius: 12px; padding: 14px 8px; font-size: 14px; font-weight: 600; }
+.qa { background: var(--card2); border: none; color: var(--text); border-radius: 12px; padding: 14px 8px; font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; gap: 8px; }
+.qa-ic { width: 22px; height: 22px; flex: 0 0 auto; }
 .qa:active { transform: scale(0.97); }
 
 /* ---------- Log rows ---------- */
