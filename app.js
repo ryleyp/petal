@@ -531,13 +531,13 @@ const RING_DEFS = `<defs>
   <linearGradient id="gGreen" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
     <stop offset="0" stop-color="#84e8cd"/><stop offset="1" stop-color="#43c6a8"/></linearGradient>
   <filter id="ringDepth" x="-25%" y="-25%" width="150%" height="150%">
-    <feDropShadow dx="0" dy="1.1" stdDeviation="1.3" flood-color="#000" flood-opacity="0.35"/></filter>
-  <filter id="markerGlow" x="-120%" y="-120%" width="340%" height="340%">
-    <feDropShadow dx="0" dy="0" stdDeviation="2.4" flood-color="#ff5d8f" flood-opacity="0.75"/></filter>
+    <feDropShadow dx="0" dy="0.9" stdDeviation="0.9" flood-color="#000" flood-opacity="0.3"/></filter>
+  <filter id="markerGlow" x="-150%" y="-150%" width="400%" height="400%">
+    <feDropShadow dx="0" dy="0" stdDeviation="1.8" flood-color="#ff5d8f" flood-opacity="0.8"/></filter>
 </defs>`;
 function drawCycleRing() {
   const el = $('#cycleRing'); if (!el) return;
-  const r = 42, w = 9.5, tISO = todayISO();
+  const r = 44, w = 5.5, tISO = todayISO();
   const TRACK = '#352a5c';
   let total, cd, arcs = '', extra = '';
   const patchMode = state.settings.onPatch && state.settings.patchStart;
@@ -545,11 +545,11 @@ function drawCycleRing() {
   if (patchMode) {
     total = 28;
     cd = patchCycleDay(tISO); if (cd === null) cd = 0;
-    const step = 360 / total, g = 2.6;
+    const step = 360 / total, g = 2;
     const seg = (s, e, grad) => ringArc(r, s * step + g, e * step - g, `url(#${grad})`, w);
     arcs = seg(0, 7, 'gAmber') + seg(7, 14, 'gAmber') + seg(14, 21, 'gAmber') + seg(21, 28, 'gPurple');
     // softly dim the part of the cycle still ahead (a gentle progress feel)
-    if (cd > 0 && cd < total) extra = ringArc(r, cd * step, 359.9, '#16102c', w + 0.4, 0.32);
+    if (cd > 0 && cd < total) extra = ringArc(r, cd * step, 359.9, '#16102c', w + 0.3, 0.3);
   } else {
     const s = cycleStats();
     total = s.avgCycle || state.settings.cycleLen || 28; // data-driven average when available
@@ -561,8 +561,8 @@ function drawCycleRing() {
     const ovD = total - (state.settings.lutealLen || 14);
     arcs += ringArc(r, (ovD - 5) * step + 1, ovD * step - 1, 'url(#gGreen)', w); // fertile
     const [ox, oy] = polar(50, 50, r, (ovD + 0.5) * step);
-    extra += `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="3.6" fill="#2fa3ff"/>` +
-             `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="1.5" fill="#fff"/>`;
+    extra += `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="2.8" fill="#2fa3ff"/>` +
+             `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="1.2" fill="#fff"/>`;
   }
 
   // glowing today marker
@@ -570,8 +570,8 @@ function drawCycleRing() {
   if (cd !== null) {
     const [mx, my] = polar(50, 50, r, (cd + 0.5) * (360 / total));
     marker = `<g filter="url(#markerGlow)">` +
-      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="5.6" fill="#fff"/>` +
-      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="5.6" fill="none" stroke="#ff5d8f" stroke-width="2.1"/></g>`;
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="4" fill="#fff"/>` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="4" fill="none" stroke="#ff5d8f" stroke-width="1.7"/></g>`;
   }
   el.innerHTML = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${RING_DEFS}
     <circle cx="50" cy="50" r="${r}" stroke="${TRACK}" stroke-width="${w}" fill="none" opacity="0.55"/>
