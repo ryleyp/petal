@@ -515,55 +515,67 @@ function renderAll() { renderToday(); renderCalendar(); renderPatch(); renderIns
 
 /* ---- Cycle ring (Clue-style) ---- */
 function polar(cx, cy, r, a) { const rad = (a - 90) * Math.PI / 180; return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)]; }
-function ringArc(r, a0, a1, color, w) {
+function ringArc(r, a0, a1, color, w, opacity = 1) {
   if (a1 <= a0) return '';
   const [x0, y0] = polar(50, 50, r, a0), [x1, y1] = polar(50, 50, r, a1);
   const large = (a1 - a0) > 180 ? 1 : 0;
-  return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}" stroke="${color}" stroke-width="${w}" fill="none" stroke-linecap="round"/>`;
+  return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}" stroke="${color}" stroke-width="${w}" fill="none" stroke-linecap="round"${opacity !== 1 ? ` stroke-opacity="${opacity}"` : ''}/>`;
 }
+const RING_DEFS = `<defs>
+  <linearGradient id="gAmber" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
+    <stop offset="0" stop-color="#ffe49a"/><stop offset="1" stop-color="#ff9d2e"/></linearGradient>
+  <linearGradient id="gPurple" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
+    <stop offset="0" stop-color="#cdbef8"/><stop offset="1" stop-color="#8a7bbf"/></linearGradient>
+  <linearGradient id="gPink" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
+    <stop offset="0" stop-color="#ffa6c6"/><stop offset="1" stop-color="#ff5d8f"/></linearGradient>
+  <linearGradient id="gGreen" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
+    <stop offset="0" stop-color="#84e8cd"/><stop offset="1" stop-color="#43c6a8"/></linearGradient>
+  <filter id="ringDepth" x="-25%" y="-25%" width="150%" height="150%">
+    <feDropShadow dx="0" dy="1.1" stdDeviation="1.3" flood-color="#000" flood-opacity="0.35"/></filter>
+  <filter id="markerGlow" x="-120%" y="-120%" width="340%" height="340%">
+    <feDropShadow dx="0" dy="0" stdDeviation="2.4" flood-color="#ff5d8f" flood-opacity="0.75"/></filter>
+</defs>`;
 function drawCycleRing() {
   const el = $('#cycleRing'); if (!el) return;
-  const r = 42, w = 9, tISO = todayISO();
-  const C = { period: '#ff5d8f', predicted: '#6b5a8f', fertile: '#43c6a8', ovul: '#2fa3ff',
-    patch: '#ffb547', patchfree: '#8a7bbf', track: '#3a2c66' };
-  let total, cd, arcs = '';
+  const r = 42, w = 9.5, tISO = todayISO();
+  const TRACK = '#352a5c';
+  let total, cd, arcs = '', extra = '';
   const patchMode = state.settings.onPatch && state.settings.patchStart;
 
   if (patchMode) {
     total = 28;
     cd = patchCycleDay(tISO); if (cd === null) cd = 0;
-    const step = 360 / total;
-    arcs += ringArc(r, 0 * step, 21 * step, C.patch, w);        // 3 patch weeks
-    arcs += ringArc(r, 21 * step, 28 * step, C.patchfree, w);    // patch-free week
-    // week-change ticks at day 7 and 14
-    [7, 14, 21].forEach((d) => {
-      const [x, y] = polar(50, 50, r, d * step);
-      arcs += `<circle cx="${x.toFixed(2)}" cy="${y.toFixed(2)}" r="1.6" fill="#1b1430"/>`;
-    });
+    const step = 360 / total, g = 2.6;
+    const seg = (s, e, grad) => ringArc(r, s * step + g, e * step - g, `url(#${grad})`, w);
+    arcs = seg(0, 7, 'gAmber') + seg(7, 14, 'gAmber') + seg(14, 21, 'gAmber') + seg(21, 28, 'gPurple');
+    // softly dim the part of the cycle still ahead (a gentle progress feel)
+    if (cd > 0 && cd < total) extra = ringArc(r, cd * step, 359.9, '#16102c', w + 0.4, 0.32);
   } else {
     const s = cycleStats();
     total = s.avgCycle || state.settings.cycleLen || 28; // data-driven average when available
     const step = 360 / total;
     const raw = s.lastStart ? daysBetween(s.lastStart, tISO) : null;
     cd = raw === null ? null : ((raw % total) + total) % total;
-    arcs += ringArc(r, 0, 360, C.track, w); // base track
     const plen = s.avgPeriod || 5;
-    arcs += ringArc(r, 0, plen * step, C.period, w);            // period
+    arcs = ringArc(r, 1, plen * step - 1, 'url(#gPink)', w);              // period
     const ovD = total - (state.settings.lutealLen || 14);
-    arcs += ringArc(r, (ovD - 5) * step, ovD * step, C.fertile, w); // fertile window
+    arcs += ringArc(r, (ovD - 5) * step + 1, ovD * step - 1, 'url(#gGreen)', w); // fertile
     const [ox, oy] = polar(50, 50, r, (ovD + 0.5) * step);
-    arcs += `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="3" fill="${C.ovul}"/>`; // ovulation
+    extra += `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="3.6" fill="#2fa3ff"/>` +
+             `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="1.5" fill="#fff"/>`;
   }
 
-  // today marker
+  // glowing today marker
   let marker = '';
   if (cd !== null) {
     const [mx, my] = polar(50, 50, r, (cd + 0.5) * (360 / total));
-    marker = `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="4.6" fill="#fff" stroke="#1b1430" stroke-width="1.4"/>`;
+    marker = `<g filter="url(#markerGlow)">` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="5.6" fill="#fff"/>` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="5.6" fill="none" stroke="#ff5d8f" stroke-width="2.1"/></g>`;
   }
-  el.innerHTML = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="50" cy="50" r="${r}" stroke="${C.track}" stroke-width="${w}" fill="none" opacity="0.5"/>
-    ${arcs}${marker}</svg>`;
+  el.innerHTML = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${RING_DEFS}
+    <circle cx="50" cy="50" r="${r}" stroke="${TRACK}" stroke-width="${w}" fill="none" opacity="0.55"/>
+    <g filter="url(#ringDepth)">${arcs}</g>${extra}${marker}</svg>`;
 }
 
 /* ---- Today ---- */
