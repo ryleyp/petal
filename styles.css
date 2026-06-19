@@ -74,8 +74,9 @@ main#views { flex: 1; padding: 12px 16px calc(96px + var(--safe-bot)); max-width
   font-size: 11px; padding: 8px 2px; display: flex; flex-direction: column; align-items: center; gap: 3px;
 }
 .tab span { font-size: 20px; }
-.tab.active { color: var(--text); }
-.tab.active span { transform: translateY(-1px); }
+.tab-ic { width: 24px; height: 24px; display: block; transition: transform .15s; }
+.tab.active { color: var(--accent); }
+.tab.active .tab-ic { transform: translateY(-1px) scale(1.08); }
 
 /* ---------- Cards & buttons ---------- */
 .card { background: var(--card); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
