@@ -3,6 +3,8 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
+const APP_VERSION = 'v11'; // shown in Settings so updates are easy to confirm
+
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -215,6 +217,7 @@ function openApp() {
   hydrateSettings();
   buildSymptomChips();
   $('#flowSeg').innerHTML = flowSegHTML(''); // build the flow control with droplet icons
+  $('#versionLabel').textContent = 'Petal ' + APP_VERSION;
   renderAll();
   requestNotifyPermission();
   scheduleReminderTimer();
@@ -537,7 +540,7 @@ const RING_DEFS = `<defs>
 </defs>`;
 function drawCycleRing() {
   const el = $('#cycleRing'); if (!el) return;
-  const r = 44, w = 5.5, tISO = todayISO();
+  const r = 45, w = 3.6, tISO = todayISO();
   const TRACK = '#352a5c';
   let total, cd, arcs = '', extra = '';
   const patchMode = state.settings.onPatch && state.settings.patchStart;
@@ -545,11 +548,11 @@ function drawCycleRing() {
   if (patchMode) {
     total = 28;
     cd = patchCycleDay(tISO); if (cd === null) cd = 0;
-    const step = 360 / total, g = 2;
+    const step = 360 / total, g = 1.6;
     const seg = (s, e, grad) => ringArc(r, s * step + g, e * step - g, `url(#${grad})`, w);
     arcs = seg(0, 7, 'gAmber') + seg(7, 14, 'gAmber') + seg(14, 21, 'gAmber') + seg(21, 28, 'gPurple');
     // softly dim the part of the cycle still ahead (a gentle progress feel)
-    if (cd > 0 && cd < total) extra = ringArc(r, cd * step, 359.9, '#16102c', w + 0.3, 0.3);
+    if (cd > 0 && cd < total) extra = ringArc(r, cd * step, 359.9, '#16102c', w + 0.2, 0.3);
   } else {
     const s = cycleStats();
     total = s.avgCycle || state.settings.cycleLen || 28; // data-driven average when available
@@ -570,8 +573,8 @@ function drawCycleRing() {
   if (cd !== null) {
     const [mx, my] = polar(50, 50, r, (cd + 0.5) * (360 / total));
     marker = `<g filter="url(#markerGlow)">` +
-      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="4" fill="#fff"/>` +
-      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="4" fill="none" stroke="#ff5d8f" stroke-width="1.7"/></g>`;
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="3.3" fill="#fff"/>` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="3.3" fill="none" stroke="#ff5d8f" stroke-width="1.4"/></g>`;
   }
   el.innerHTML = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${RING_DEFS}
     <circle cx="50" cy="50" r="${r}" stroke="${TRACK}" stroke-width="${w}" fill="none" opacity="0.55"/>
