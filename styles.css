@@ -84,7 +84,13 @@ main#views {
 .tab span { font-size: 20px; }
 .tab-ic { width: 24px; height: 24px; display: block; transition: transform .15s; }
 .tab.active { color: var(--accent); }
-.tab.active .tab-ic { transform: translateY(-1px) scale(1.08); }
+.tab.active .tab-ic { transform: translateY(-1px) scale(1.08); animation: tab-bounce .4s cubic-bezier(.34,1.56,.64,1); }
+@keyframes tab-bounce {
+  0% { transform: translateY(0) scale(1); }
+  45% { transform: translateY(-5px) scale(1.22); }
+  75% { transform: translateY(0) scale(.95); }
+  100% { transform: translateY(-1px) scale(1.08); }
+}
 
 /* ---------- Cards & buttons ---------- */
 .card { background: var(--card); border-radius: var(--radius); padding: 16px; margin-bottom: 14px; }
@@ -142,8 +148,11 @@ main#views {
   background: var(--card2); color: var(--text); font-size: 15px; font-family: inherit;
 }
 .seg { display: flex; flex-wrap: wrap; gap: 6px; }
-.seg button { flex: 1; min-width: 60px; background: var(--card2); border: 1px solid #4a3a7a; color: var(--muted); border-radius: 10px; padding: 9px 4px; font-size: 13px; }
+.seg button { flex: 1; min-width: 58px; background: var(--card2); border: 1px solid #4a3a7a; color: var(--muted); border-radius: 10px; padding: 8px 4px; font-size: 12px;
+  display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .seg button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.seg-ic { width: 19px; height: 21px; display: block; transition: transform .15s; }
+.seg button.on .seg-ic { color: #fff !important; transform: scale(1.12); }
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .chip { background: var(--card2); border: 1px solid #4a3a7a; color: var(--muted); border-radius: 999px; padding: 7px 12px; font-size: 13px; }
 .chip.on { background: var(--accent2); border-color: var(--accent2); color: #fff; }

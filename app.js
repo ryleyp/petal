@@ -113,6 +113,28 @@ function toast(msg) {
 const SYMPTOMS = ['Cramps', 'Headache', 'Bloating', 'Tender breasts', 'Acne', 'Fatigue',
   'Mood swings', 'Nausea', 'Back pain', 'Cravings', 'Low energy', 'High energy'];
 
+/* Flow strength as a cute droplet whose size + colour grows with intensity. */
+const FLOWS = [['', 'None'], ['spotting', 'Spotting'], ['light', 'Light'], ['medium', 'Medium'], ['heavy', 'Heavy']];
+function dropletIcon(color, scale, outline) {
+  const t = `translate(12 12) scale(${scale}) translate(-12 -12)`;
+  const d = 'M12 4c2.7 3.3 4.6 5.7 4.6 8.1a4.6 4.6 0 0 1-9.2 0C7.4 9.7 9.3 7.3 12 4z';
+  const shape = outline
+    ? `<path d="${d}" fill="none" stroke="currentColor" stroke-width="2" transform="${t}"/>`
+    : `<path d="${d}" fill="currentColor" transform="${t}"/>`;
+  return `<svg class="seg-ic" viewBox="0 0 24 24" style="color:${color}" aria-hidden="true">${shape}</svg>`;
+}
+const FLOW_ICONS = {
+  '': dropletIcon('var(--muted)', 0.8, true),
+  spotting: dropletIcon('#ffb3c8', 0.5, false),
+  light: dropletIcon('#ff85a6', 0.72, false),
+  medium: dropletIcon('#ff5d7e', 0.9, false),
+  heavy: dropletIcon('#e23b5a', 1.05, false),
+};
+function flowSegHTML(currentVal) {
+  return FLOWS.map(([v, l]) =>
+    `<button data-val="${v}" class="${(currentVal || '') === v ? 'on' : ''}">${FLOW_ICONS[v]}<span>${l}</span></button>`).join('');
+}
+
 /* ============================================================ Lock flow === */
 const lockEl = $('#lock'), appEl = $('#app');
 
@@ -192,6 +214,7 @@ function openApp() {
   appEl.classList.remove('hidden');
   hydrateSettings();
   buildSymptomChips();
+  $('#flowSeg').innerHTML = flowSegHTML(''); // build the flow control with droplet icons
   renderAll();
   requestNotifyPermission();
   scheduleReminderTimer();
@@ -762,13 +785,12 @@ function showDayDetail(ds) {
   const removedHere = acts.some((a) => a.action === 'remove' || a.action === 'detached');
   if (appliedHere) tags.push('🩹 Applied (logged)');
   if (removedHere) tags.push('🌙 Removed (logged)');
-  const flows = [['', 'None'], ['spotting', 'Spotting'], ['light', 'Light'], ['medium', 'Medium'], ['heavy', 'Heavy']];
   const box = $('#dayDetail'); box.classList.remove('hidden');
   box.innerHTML = `
     <div class="card-head"><h2>${fmtDate(ds, { weekday: 'long', month: 'long', day: 'numeric' })}</h2></div>
     <p class="muted small">${tags.join(' &nbsp;·&nbsp; ') || 'Nothing logged'}</p>
     <div class="log-row"><label>Flow strength</label>
-      <div class="seg" id="dFlow">${flows.map(([v, l]) => `<button data-val="${v}" class="${(log.flow || '') === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="seg" id="dFlow">${flowSegHTML(log.flow || '')}</div>
     </div>
     <div class="log-row"><label>Notes</label>
       <textarea id="dNotes" rows="2" placeholder="Notes for this day…">${log.notes ? escapeHtml(log.notes) : ''}</textarea>
