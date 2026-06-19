@@ -22,10 +22,12 @@
       <h1>Petal</h1>
       <p class="lock-sub" id="lockSub">Enter your passcode to unlock</p>
       <form id="lockForm" autocomplete="off">
-        <input id="pass1" class="pass-input" type="password" inputmode="numeric"
-               placeholder="Passcode" autocomplete="off" />
-        <input id="pass2" class="pass-input hidden" type="password" inputmode="numeric"
-               placeholder="Confirm passcode" autocomplete="off" />
+        <input id="pass1" class="pass-input" type="password"
+               placeholder="Passcode" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false" />
+        <input id="pass2" class="pass-input hidden" type="password"
+               placeholder="Confirm passcode" autocomplete="off"
+               autocapitalize="off" autocorrect="off" spellcheck="false" />
         <p id="lockError" class="lock-error"></p>
         <button id="lockBtn" type="submit" class="btn btn-primary">Unlock</button>
       </form>
