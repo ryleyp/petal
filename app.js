@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v11'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v12'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -135,6 +135,22 @@ const FLOW_ICONS = {
 function flowSegHTML(currentVal) {
   return FLOWS.map(([v, l]) =>
     `<button data-val="${v}" class="${(currentVal || '') === v ? 'on' : ''}">${FLOW_ICONS[v]}<span>${l}</span></button>`).join('');
+}
+
+/* Tiny inline icons so the whole UI shares one soft, rounded look (no emoji). */
+const IC_PATHS = {
+  check: '<circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M7.8 12.4l2.6 2.6 5.6-5.7" fill="none" stroke="#1b1430" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  warn: '<path d="M12 3.2c.8 0 1.5.4 1.9 1.1l7 12.3a2.2 2.2 0 0 1-1.9 3.3H5a2.2 2.2 0 0 1-1.9-3.3l7-12.3c.4-.7 1.1-1.1 1.9-1.1z" fill="currentColor"/><rect x="10.9" y="8.2" width="2.2" height="5.6" rx="1.1" fill="#1b1430"/><circle cx="12" cy="16.4" r="1.3" fill="#1b1430"/>',
+  clock: '<circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7.4V12l3.2 2" fill="none" stroke="#1b1430" stroke-width="2.2" stroke-linecap="round"/>',
+  bandage: '<g transform="rotate(-40 12 12)"><rect x="3" y="8.4" width="18" height="7.2" rx="3.6" fill="currentColor"/><g fill="#1b1430" opacity=".55"><circle cx="9.4" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="14.6" cy="12" r="1"/></g></g>',
+  moon: '<path d="M15.6 3.2A9 9 0 1 0 21 14.6 7 7 0 0 1 15.6 3.2z" fill="currentColor"/>',
+  drop: '<path d="M12 3.4c3 3.7 5.2 6.4 5.2 9.1a5.2 5.2 0 0 1-10.4 0c0-2.7 2.2-5.4 5.2-9.1z" fill="currentColor"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="4" fill="currentColor"/><rect x="7" y="2.6" width="2.4" height="4.6" rx="1.2" fill="currentColor"/><rect x="14.6" y="2.6" width="2.4" height="4.6" rx="1.2" fill="currentColor"/><circle cx="9" cy="13" r="1.4" fill="#1b1430"/><circle cx="12.5" cy="13" r="1.4" fill="#1b1430"/><circle cx="9" cy="16.4" r="1.4" fill="#1b1430"/>',
+  backup: '<circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7.2v6M9.4 11l2.6 2.6L14.6 11M8.4 16.2h7.2" fill="none" stroke="#1b1430" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>',
+  sparkle: '<path d="M12 3l1.8 5.4L19 10l-5.2 1.7L12 17l-1.8-5.3L5 10l5.2-1.6z" fill="currentColor"/>',
+};
+function ic(name, color, cls = 'a-ic') {
+  return `<svg class="${cls}" viewBox="0 0 24 24" style="color:${color}" aria-hidden="true">${IC_PATHS[name]}</svg>`;
 }
 
 /* ============================================================ Lock flow === */
@@ -587,35 +603,40 @@ function renderToday() {
   $('#todayDate').textContent = fmtDate(tISO, { weekday: 'long', month: 'long', day: 'numeric' });
   drawCycleRing();
 
-  // hero
-  const heroDay = $('#heroDay'), heroLabel = $('#heroLabel'), heroSub = $('#heroSub');
+  // hero: one glance, one fact — a big number in the ring center
   const np = predictNextPeriod();
   const cd = patchCycleDay(tISO);
+  const setHero = (kicker, big, cap, sub, words) => {
+    $('#heroKicker').textContent = kicker;
+    const hb = $('#heroBig');
+    hb.textContent = big;
+    hb.classList.toggle('words', !!words || String(big).length > 3);
+    $('#heroCap').textContent = cap;
+    $('#heroSub').textContent = sub;
+  };
+  const dayWord = (n) => `day${n === 1 ? '' : 's'}`;
   if (state.settings.onPatch && cd !== null) {
-    const week = Math.floor(cd / 7) + 1;
-    heroDay.textContent = `Patch cycle · day ${cd + 1} of 28`;
     if (isPatchFree(cd)) {
       const back = 28 - cd;
-      heroLabel.textContent = 'Patch-free week 🌙';
-      heroSub.textContent = `Withdrawal bleed expected. New patch in ${back} day${back === 1 ? '' : 's'}.`;
+      setHero('Patch-free week', back, `${dayWord(back)} until new patch`,
+        `Day ${cd + 1} of 28 · a withdrawal bleed is normal this week`);
     } else {
-      heroLabel.textContent = `Patch week ${week} 🩹`;
-      const nextChange = 7 - (cd % 7);
-      heroSub.textContent = cd >= 14
-        ? `Remove patch in ${21 - cd} day${21 - cd === 1 ? '' : 's'}.`
-        : `Change patch in ${nextChange} day${nextChange === 1 ? '' : 's'}.`;
+      const week = Math.floor(cd / 7) + 1;
+      const left = week === 3 ? 21 - cd : 7 - (cd % 7);
+      setHero(`Patch week ${week}`, left,
+        `${dayWord(left)} until ${week === 3 ? 'removal' : 'patch change'}`,
+        `Day ${cd + 1} of 28`);
     }
   } else if (np) {
     const dleft = daysBetween(tISO, np);
-    heroDay.textContent = dleft >= 0 ? 'Next period' : 'Period';
-    if (dleft > 1) { heroLabel.textContent = `In ${dleft} days`; heroSub.textContent = `Expected ${fmtDate(np)}`; }
-    else if (dleft === 1) { heroLabel.textContent = 'Tomorrow'; heroSub.textContent = fmtDate(np); }
-    else if (dleft === 0) { heroLabel.textContent = 'Expected today'; heroSub.textContent = ''; }
-    else { heroLabel.textContent = `${-dleft} day${-dleft === 1 ? '' : 's'} late`; heroSub.textContent = 'Log it when it starts'; }
+    const s = cycleStats();
+    const cyc = s.lastStart ? daysBetween(s.lastStart, tISO) + 1 : null;
+    const sub = cyc ? `Cycle day ${cyc}` : '';
+    if (dleft > 0) setHero('Next period', dleft, `${dayWord(dleft)} away · ${fmtDate(np)}`, sub);
+    else if (dleft === 0) setHero('Next period', 'Today', 'expected — log it when it starts', sub, true);
+    else setHero('Period', -dleft, `${dayWord(-dleft)} late · log it when it starts`, sub);
   } else {
-    heroDay.textContent = 'Welcome 🌸';
-    heroLabel.textContent = 'Start tracking';
-    heroSub.textContent = 'Log a period or set your patch schedule.';
+    setHero('Welcome', 'Hello', 'let’s get set up', 'Log a period or set your patch schedule.', true);
   }
 
   renderAlerts();
@@ -628,9 +649,9 @@ function renderToday() {
 }
 
 const LEVEL_META = {
-  ok: { cls: 'ok', emoji: '✅' },
-  caution: { cls: 'due', emoji: '⏰' },
-  risk: { cls: 'due', emoji: '⚠️' },
+  ok: { cls: 'ok', icon: () => ic('check', 'var(--ok)') },
+  caution: { cls: 'due', icon: () => ic('clock', 'var(--patch)') },
+  risk: { cls: 'due', icon: () => ic('warn', 'var(--accent)') },
 };
 function renderAlerts() {
   const box = $('#alerts'); box.innerHTML = '';
@@ -641,7 +662,7 @@ function renderAlerts() {
   if (a) {
     const m = LEVEL_META[a.level] || LEVEL_META.ok;
     box.insertAdjacentHTML('beforeend',
-      `<div class="alert ${m.cls}"><span class="a-emoji">${m.emoji}</span><div><b>${a.title}.</b> ${a.message}` +
+      `<div class="alert ${m.cls}">${m.icon()}<div><b>${a.title}.</b> ${a.message}` +
       (a.level === 'risk' ? `<div class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</div>` : '') +
       `</div></div>`);
   } else if (state.settings.onPatch && state.settings.patchStart) {
@@ -650,9 +671,9 @@ function renderAlerts() {
     const todayEv = evs.find((e) => e.date === tISO);
     const tomEv = evs.find((e) => e.date === iso(addDays(today(), 1)));
     if (todayEv) box.insertAdjacentHTML('beforeend',
-      `<div class="alert due"><span class="a-emoji">🩹</span><div><b>Patch task today:</b> ${todayEv.label}.</div></div>`);
+      `<div class="alert due">${ic('bandage', 'var(--patch)')}<div><b>Patch task today:</b> ${todayEv.label}.</div></div>`);
     else if (tomEv) box.insertAdjacentHTML('beforeend',
-      `<div class="alert"><span class="a-emoji">⏰</span><div><b>Tomorrow:</b> ${tomEv.label}.</div></div>`);
+      `<div class="alert">${ic('clock', 'var(--patch)')}<div><b>Tomorrow:</b> ${tomEv.label}.</div></div>`);
   }
 
   // late period (natural cycle only)
@@ -660,7 +681,7 @@ function renderAlerts() {
   if (np && !state.settings.onPatch) {
     const dleft = daysBetween(tISO, np);
     if (dleft <= -2) box.insertAdjacentHTML('beforeend',
-      `<div class="alert"><span class="a-emoji">📅</span><div>Your period is ${-dleft} days later than predicted.</div></div>`);
+      `<div class="alert">${ic('calendar', 'var(--patchfree)')}<div>Your period is ${-dleft} days later than predicted.</div></div>`);
   }
 
   // gentle backup reminder so a year of data survives iOS storage eviction
@@ -672,7 +693,7 @@ function maybeBackupReminder(box) {
   const stale = !last || daysBetween(last, todayISO()) >= 30;
   if (stale && (state.periods.length || (state.patchActions && state.patchActions.length))) {
     box.insertAdjacentHTML('beforeend',
-      `<div class="alert"><span class="a-emoji">💾</span><div>Back up your data so it can't be lost — Settings → Export encrypted backup, then save it to iCloud Drive.</div></div>`);
+      `<div class="alert">${ic('backup', 'var(--fertile)')}<div>Back up your data so it can't be lost — Settings → Export encrypted backup, then save it to iCloud Drive.</div></div>`);
   }
 }
 
@@ -788,22 +809,23 @@ function showDayDetail(ds) {
   $$('#calGrid .cal-cell').forEach((c) => c.classList.toggle('sel', c.dataset.date === ds));
   const info = dayInfo(ds);
   const log = state.logs[ds] || {};
+  const tag = (cls, label) => `<span class="d-tag"><i class="dot ${cls}"></i>${label}</span>`;
   const tags = [];
-  if (info.period) tags.push('🩸 Period');
-  if (info.predicted) tags.push('• Predicted period');
-  if (info.ovul) tags.push('🔵 Predicted ovulation');
-  if (info.fertile) tags.push('🟢 Fertile window');
-  if (info.patch) tags.push('🩹 Patch on');
-  if (info.patchfree) tags.push('🌙 Patch-free');
+  if (info.period) tags.push(tag('period', 'Period'));
+  if (info.predicted) tags.push(tag('predicted', 'Predicted period'));
+  if (info.ovul) tags.push(tag('ovul', 'Predicted ovulation'));
+  if (info.fertile) tags.push(tag('fertile', 'Fertile window'));
+  if (info.patch) tags.push(tag('patch', 'Patch on'));
+  if (info.patchfree) tags.push(tag('patchfree', 'Patch-free'));
   const acts = patchActionsOn(ds);
   const appliedHere = acts.some((a) => a.action === 'apply');
   const removedHere = acts.some((a) => a.action === 'remove' || a.action === 'detached');
-  if (appliedHere) tags.push('🩹 Applied (logged)');
-  if (removedHere) tags.push('🌙 Removed (logged)');
+  if (appliedHere) tags.push(tag('act-apply', 'Applied (logged)'));
+  if (removedHere) tags.push(tag('act-remove', 'Removed (logged)'));
   const box = $('#dayDetail'); box.classList.remove('hidden');
   box.innerHTML = `
     <div class="card-head"><h2>${fmtDate(ds, { weekday: 'long', month: 'long', day: 'numeric' })}</h2></div>
-    <p class="muted small">${tags.join(' &nbsp;·&nbsp; ') || 'Nothing logged'}</p>
+    <p class="muted small d-tags">${tags.join('') || 'Nothing logged'}</p>
     <div class="log-row"><label>Flow strength</label>
       <div class="seg" id="dFlow">${flowSegHTML(log.flow || '')}</div>
     </div>
@@ -812,13 +834,13 @@ function showDayDetail(ds) {
     </div>
     <button class="btn btn-primary full" data-act="save">Save this day</button>
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-      <button class="btn btn-ghost" data-act="ps" style="flex:1">🩸 Period started</button>
-      <button class="btn btn-ghost" data-act="pe" style="flex:1">✅ Period ended</button>
+      <button class="btn btn-ghost btn-ic" data-act="ps" style="flex:1">${ic('drop', 'var(--period)', 'b-ic')}Period started</button>
+      <button class="btn btn-ghost btn-ic" data-act="pe" style="flex:1">${ic('check', 'var(--ok)', 'b-ic')}Period ended</button>
     </div>
     <div class="log-row" style="margin-top:8px"><label>Patch (log for this day)</label>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-ghost" data-act="${appliedHere ? 'unapply' : 'apply'}" style="flex:1">${appliedHere ? '✕ Undo applied' : '🩹 Applied patch'}</button>
-        <button class="btn btn-ghost" data-act="${removedHere ? 'unremove' : 'remove'}" style="flex:1">${removedHere ? '✕ Undo removed' : '🌙 Removed patch'}</button>
+        <button class="btn btn-ghost btn-ic" data-act="${appliedHere ? 'unapply' : 'apply'}" style="flex:1">${appliedHere ? '✕ Undo applied' : ic('bandage', 'var(--patch)', 'b-ic') + 'Applied patch'}</button>
+        <button class="btn btn-ghost btn-ic" data-act="${removedHere ? 'unremove' : 'remove'}" style="flex:1">${removedHere ? '✕ Undo removed' : ic('moon', 'var(--patchfree)', 'b-ic') + 'Removed patch'}</button>
       </div>
     </div>`;
   box.querySelector('#dFlow').addEventListener('click', (e) => {
@@ -858,8 +880,9 @@ function renderPatch() {
   const sc = $('#patchStatusCard');
   const a = assessPatch();
   if (a) {
+    const m = LEVEL_META[a.level] || LEVEL_META.ok;
     sc.className = `status-card ${a.level}`;
-    sc.innerHTML = `<h2>${a.title}</h2><p>${a.message}</p>` +
+    sc.innerHTML = `<h2 style="display:flex;align-items:center;gap:8px">${m.icon()}${a.title}</h2><p>${a.message}</p>` +
       (a.level === 'risk' ? `<p class="muted small" style="margin-top:8px">${GUIDE_DISCLAIMER}</p>` : '');
   } else {
     sc.className = '';
@@ -924,10 +947,10 @@ function renderInsights() {
   if (state.settings.onPatch) {
     const np = predictNextPeriod();
     ob.innerHTML = `
-      <div class="insight-line">🩹 <b>You're using the combined patch.</b> It works mainly by
+      <div class="insight-line">${ic('bandage', 'var(--patch)', 'i-ic')} <b>You're using the combined patch.</b> It works mainly by
       <b>suppressing ovulation</b>, so while you wear it consistently you generally don't ovulate —
       there's no fertile window to predict.</div>
-      <div class="insight-line">🌙 The bleeding in your <b>patch-free week</b> is a
+      <div class="insight-line">${ic('moon', 'var(--patchfree)', 'i-ic')} The bleeding in your <b>patch-free week</b> is a
       <b>withdrawal bleed</b>, not a true period. ${patchFreeNext()}</div>
       <div class="insight-line muted small">If you stop the patch, turn off “Currently using the patch”
       in Settings and Petal will estimate your fertile window from your logged cycles.</div>`;
@@ -937,9 +960,9 @@ function renderInsights() {
       const ovul = iso(addDays(parseISO(np), -state.settings.lutealLen));
       const fStart = iso(addDays(parseISO(ovul), -5));
       ob.innerHTML = `
-        <div class="insight-line">🔵 Estimated <b>ovulation: ${fmtDate(ovul)}</b>
+        <div class="insight-line">${ic('sparkle', 'var(--ovul)', 'i-ic')} Estimated <b>ovulation: ${fmtDate(ovul)}</b>
         (about ${state.settings.lutealLen} days before your next predicted period).</div>
-        <div class="insight-line">🟢 Most fertile window: <b>${fmtDate(fStart)} – ${fmtDate(ovul)}</b>.</div>
+        <div class="insight-line">${ic('drop', 'var(--fertile)', 'i-ic')} Most fertile window: <b>${fmtDate(fStart)} – ${fmtDate(ovul)}</b>.</div>
         <div class="insight-line muted small">This is an estimate from your average cycle and luteal
         phase — actual ovulation varies. Not a contraceptive method.</div>`;
     } else {
@@ -949,17 +972,24 @@ function renderInsights() {
 
   // patch history (on time / late, derived from logged dates)
   const ph = $('#patchHistory'); ph.innerHTML = '';
-  const STATUS_ICON = { ok: '✅', caution: '⚠️', risk: '⚠️' };
+  const STATUS_META = {
+    ok: () => ic('check', 'var(--ok)', 'h-ic'),
+    caution: () => ic('clock', 'var(--patch)', 'h-ic'),
+    risk: () => ic('warn', 'var(--accent)', 'h-ic'),
+  };
   const STATUS_COLOR = { ok: 'var(--ok)', caution: 'var(--patch)', risk: 'var(--accent)' };
   const hist = patchHistory();
   if (!hist.length) {
     ph.innerHTML = '<p class="muted small">No patch actions logged yet. Tap a day on the Calendar to log when you applied or removed a patch.</p>';
   } else {
     hist.slice(0, 20).forEach((e) => {
-      const verb = e.action === 'apply' ? '🩹 Applied' : (e.action === 'detached' ? '🩹 Fell off' : '🌙 Removed');
+      const verb = e.action === 'apply'
+        ? ic('bandage', 'var(--patch)', 'h-ic') + ' Applied'
+        : (e.action === 'detached' ? ic('bandage', 'var(--muted)', 'h-ic') + ' Fell off'
+        : ic('moon', 'var(--patchfree)', 'h-ic') + ' Removed');
       ph.insertAdjacentHTML('beforeend',
         `<div class="h-item"><span>${verb} · ${fmtDate(e.date)}</span>` +
-        `<span style="color:${STATUS_COLOR[e.status]}">${STATUS_ICON[e.status]} ${e.note}</span></div>`);
+        `<span style="color:${STATUS_COLOR[e.status]}">${STATUS_META[e.status]()} ${e.note}</span></div>`);
     });
   }
 

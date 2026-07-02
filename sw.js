@@ -1,6 +1,6 @@
 /* Petal service worker — offline cache only. No data ever leaves the device;
  * the SW caches the app shell so it works with no connection. */
-const CACHE = 'petal-v11';
+const CACHE = 'petal-v12';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +11,7 @@ const ASSETS = [
   './icon-192.png',
   './icon-512.png',
   './apple-touch-icon.png',
+  './fonts/quicksand.woff2',
 ];
 
 self.addEventListener('install', (e) => {

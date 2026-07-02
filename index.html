@@ -42,8 +42,12 @@
   <!-- ============ APP ============ -->
   <div id="app" class="app hidden">
     <header class="topbar">
-      <span class="brand">🌸 Petal</span>
-      <button id="lockNow" class="icon-btn" title="Lock now" aria-label="Lock now">🔒</button>
+      <span class="brand"><img src="./icon.svg" class="brand-ic" alt="" /> Petal</span>
+      <button id="lockNow" class="icon-btn" title="Lock now" aria-label="Lock now">
+        <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor" aria-hidden="true">
+          <path d="M12 2.4a5 5 0 0 0-5 5V10H6.6A2.6 2.6 0 0 0 4 12.6v6A2.6 2.6 0 0 0 6.6 21.2h10.8a2.6 2.6 0 0 0 2.6-2.6v-6A2.6 2.6 0 0 0 17.4 10H17V7.4a5 5 0 0 0-5-5zm-2.6 5a2.6 2.6 0 0 1 5.2 0V10H9.4zM12 13.6a1.7 1.7 0 0 1 .9 3.14v1.36a.9.9 0 0 1-1.8 0v-1.36a1.7 1.7 0 0 1 .9-3.14z"/>
+        </svg>
+      </button>
     </header>
 
     <main id="views">
@@ -52,8 +56,9 @@
         <div class="ring-wrap">
           <div id="cycleRing" class="ring"></div>
           <div class="ring-center">
-            <div class="hero-day" id="heroDay">—</div>
-            <div class="hero-label" id="heroLabel">Loading…</div>
+            <div class="hero-kicker" id="heroKicker"></div>
+            <div class="hero-big" id="heroBig">—</div>
+            <div class="hero-cap" id="heroCap">loading…</div>
           </div>
         </div>
         <div class="hero-sub" id="heroSub"></div>
@@ -180,7 +185,9 @@
         <div class="card" id="patchScheduleCard">
           <div class="card-head"><h2>Upcoming patch events</h2></div>
           <div id="patchSchedule" class="schedule"></div>
-          <button id="exportIcs" class="btn btn-ghost full">📅 Add reminders to my Calendar (.ics)</button>
+          <button id="exportIcs" class="btn btn-ghost full btn-ic">
+            <svg class="b-ic" viewBox="0 0 24 24" style="color:var(--patchfree)" aria-hidden="true"><rect x="3.5" y="5" width="17" height="15.5" rx="4" fill="currentColor"/><rect x="7" y="2.6" width="2.4" height="4.6" rx="1.2" fill="currentColor"/><rect x="14.6" y="2.6" width="2.4" height="4.6" rx="1.2" fill="currentColor"/><circle cx="9" cy="13" r="1.4" fill="#1b1430"/><circle cx="12.5" cy="13" r="1.4" fill="#1b1430"/><circle cx="9" cy="16.4" r="1.4" fill="#1b1430"/></svg>
+            Add reminders to my Calendar (.ics)</button>
           <p class="muted small center">The calendar export is the most reliable way to get
             alarms on your phone — notifications only fire while the app is open.</p>
         </div>
