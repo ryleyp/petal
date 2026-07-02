@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v15'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v16'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -89,6 +89,7 @@ function defaultState() {
 
 async function saveState() {
   if (!KEY) return;
+  invalidatePeriods();
   const { iv, ct } = await encryptState(KEY, state);
   writeVault({ v: 2, salt: b64.enc(SALT), iter: ITER, iv, ct });
 }
@@ -244,6 +245,7 @@ function migrate() {
 }
 
 function openApp() {
+  invalidatePeriods();
   lockEl.classList.add('hidden');
   appEl.classList.remove('hidden');
   hydrateSettings();
@@ -265,11 +267,52 @@ document.addEventListener('visibilitychange', () => {
 $('#lockNow').addEventListener('click', () => location.reload());
 
 /* ============================================================ Periods ===== */
+/* Periods are DERIVED from the bleeding you log day-by-day: an episode starts on
+ * the first bleeding day after a gap and ends on the last bleeding day before a
+ * gap (any bleed-free calendar day ends it). Episodes that are only spotting, or
+ * marked breakthrough on every day, don't count as periods — they're breakthrough
+ * bleeding. Manually logged periods (the Started/Ended buttons) still work as a
+ * fallback layer for ranges with no daily flow logs. */
+let _periodsCache = null;
+function invalidatePeriods() { _periodsCache = null; }
+
+function bleedEpisodes() {
+  const days = Object.entries(state.logs)
+    .filter(([, l]) => l.flow)
+    .map(([d, l]) => ({ d, flow: l.flow, bt: l.bleedType || '' }))
+    .sort((a, b) => a.d.localeCompare(b.d));
+  const eps = [];
+  for (const day of days) {
+    const cur = eps[eps.length - 1];
+    if (cur && daysBetween(cur.end, day.d) === 1) {
+      cur.end = day.d; cur.days.push(day);
+    } else {
+      eps.push({ start: day.d, end: day.d, days: [day] });
+    }
+  }
+  return eps;
+}
+
+function derivedPeriods() {
+  return bleedEpisodes()
+    .filter((e) => e.days.some((x) => x.flow !== 'spotting') && e.days.some((x) => x.bt !== 'breakthrough'))
+    .map((e) => ({ start: e.start, end: e.end, ongoing: e.end === todayISO(), derived: true }));
+}
+
 function sortedPeriods() {
-  return [...state.periods].sort((a, b) => a.start.localeCompare(b.start));
+  if (_periodsCache) return _periodsCache;
+  const derived = derivedPeriods();
+  // manual periods only fill gaps the daily logs don't cover
+  const manual = (state.periods || []).filter((m) => {
+    const mEnd = m.end || todayISO();
+    return !derived.some((d) => m.start <= d.end && mEnd >= d.start);
+  });
+  _periodsCache = derived.concat(manual).sort((a, b) => a.start.localeCompare(b.start));
+  return _periodsCache;
 }
 function openPeriod() {
-  const ps = sortedPeriods();
+  // manual layer only — the Started/Ended buttons operate on stored entries
+  const ps = [...(state.periods || [])].sort((a, b) => a.start.localeCompare(b.start));
   const last = ps[ps.length - 1];
   return last && !last.end ? last : null;
 }
@@ -694,13 +737,11 @@ function dayInfo(dateStr) {
   const log = state.logs[dateStr];
   if (log) { info.note = !!(log.notes || (log.symptoms && log.symptoms.length)); info.flow = log.flow || ''; }
 
-  // logged periods
-  for (const p of state.periods) {
-    const end = p.end || (p.start === dateStr ? p.start : iso(addDays(parseISO(p.start), 5)));
-    if (dateStr >= p.start && dateStr <= (p.end || end) && p.end) { if (dateStr >= p.start && dateStr <= p.end) info.period = true; }
-    if (!p.end && dateStr === p.start) info.period = true;
+  // periods (derived from logged bleeding, plus manual fallback entries)
+  for (const p of sortedPeriods()) {
+    if (dateStr >= p.start && dateStr <= (p.end || p.start)) { info.period = true; break; }
   }
-  if (info.flow && info.flow !== '') info.period = true;
+  if (info.flow) info.period = true;
 
   // patch overlay
   if (state.settings.patchStart) {
@@ -963,10 +1004,7 @@ $('#saveToday').addEventListener('click', () => {
   const notes = $('#todayNotes').value.trim();
   if (!flow && !symptoms.length && !tags.length && !notes) { delete state.logs[tISO]; }
   else state.logs[tISO] = { flow, bleedType, symptoms, tags, notes };
-  // auto-create period when flow logged and none open
-  if (flow && flow !== 'spotting' && !openPeriod() && !state.periods.some((p) => p.start === tISO)) {
-    state.periods.push({ start: tISO, end: null });
-  }
+  // periods are derived from consecutive bleeding days — no manual entry needed
   saveState(); renderAll(); toast('Saved');
 });
 
@@ -1237,10 +1275,7 @@ function showDayDetail(ds) {
     const prev = state.logs[ds] || {};
     if (!flow && !notes && !tags.length && !(prev.symptoms && prev.symptoms.length)) delete state.logs[ds];
     else state.logs[ds] = { flow, bleedType, symptoms: prev.symptoms || [], tags, notes };
-    // logging real flow (not spotting) starts a period if none covers this day
-    if (flow && flow !== 'spotting' && !state.periods.some((p) => ds >= p.start && ds <= (p.end || p.start))) {
-      if (!state.periods.some((p) => p.start === ds)) state.periods.push({ start: ds, end: null });
-    }
+    // periods are derived from consecutive bleeding days — no manual entry needed
     saveState(); renderAll(); showDayDetail(ds); toast('Day saved');
   });
   box.querySelector('[data-act="ps"]').addEventListener('click', () => { startPeriod(ds); showDayDetail(ds); });
@@ -1429,12 +1464,19 @@ function renderInsights() {
       const startD = psAsc[i].start;
       const next = psAsc[i + 1];
       const len = next ? daysBetween(startD, next.start) : daysBetween(startD, todayISO()) + 1;
-      const bleed = psAsc[i].end ? daysBetween(startD, psAsc[i].end) + 1 : Math.min(len, 5);
-      if (len >= 1 && len <= 60) cycles.push({ start: startD, len, bleed: Math.min(bleed, len), ongoing: !next });
+      const bleedRaw = psAsc[i].end ? daysBetween(startD, psAsc[i].end) + 1 : Math.min(len, 5);
+      const bleed = Math.min(Math.max(bleedRaw, 1), len);
+      // closed cycles under 15 days are noise (e.g. two bleed episodes close together);
+      // the trailing in-progress cycle shows at any length
+      if (next ? (len >= 15 && len <= 60) : (len >= 1 && len <= 60)) {
+        cycles.push({ start: startD, len, bleed, ongoing: !next });
+      }
     }
     const show = cycles.slice(-6).reverse(); // newest first
     const maxLen = Math.max(...show.map((c) => c.len), state.settings.cycleLen);
-    cc.innerHTML = show.map((c) => `
+    cc.innerHTML = !show.length
+      ? '<p class="muted small">Not enough consecutive-bleeding history yet — log flow day-by-day and cycles will appear here.</p>'
+      : show.map((c) => `
       <div class="cyc-row">
         <span class="cyc-date">${fmtDate(c.start, { month: 'short', day: 'numeric' })}</span>
         <div class="cyc-track">
