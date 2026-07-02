@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v12'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v13'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -306,9 +306,42 @@ function predictNextPeriod() {
 
 /* ============================================================ Patch ======= */
 const PATCH_CYCLE = 28;
+
+/* The effective start of the CURRENT 28-day cycle, derived from what was actually
+ * logged — not just the manual "first patch" date. Per combined-patch guidance,
+ * the cycle re-anchors when:
+ *   - a new patch goes on after a remove/detach (day 1 of a new cycle), or
+ *   - a weekly change is ≥48h late (≥9-day gap): that patch starts a NEW cycle.
+ * On-time or <48h-late changes keep the existing change day. */
+// All the dates at which a fresh 28-day cycle began (chronological): the manual
+// first-patch date, plus any apply that restarted the cycle (new patch after a
+// remove/detach, or a ≥48h-late weekly change).
+function cycleAnchors() {
+  const anchors = [];
+  if (state.settings.patchStart) anchors.push(state.settings.patchStart);
+  let prev = null;
+  for (const a of sortedActions()) {
+    if (a.action === 'apply') {
+      if (!anchors.length) anchors.push(a.date);
+      else if (prev && (prev.action === 'remove' || prev.action === 'detached')) anchors.push(a.date);
+      else if (prev && prev.action === 'apply' && daysBetween(prev.date, a.date) >= 9) anchors.push(a.date);
+    }
+    prev = a;
+  }
+  return [...new Set(anchors)].sort((x, y) => x.localeCompare(y));
+}
+// The current cycle's start (for today / upcoming schedule).
+function cycleAnchor() { const a = cycleAnchors(); return a.length ? a[a.length - 1] : null; }
+// The anchor in effect on a given date (so history stays correct across re-anchors).
+function anchorFor(dateStr) {
+  let best = null;
+  for (const an of cycleAnchors()) { if (an <= dateStr) best = an; else break; }
+  return best;
+}
+
 // returns 0-based day within the 28-day patch cycle, or null
 function patchCycleDay(dateStr) {
-  const p = state.settings.patchStart;
+  const p = anchorFor(dateStr);
   if (!p) return null;
   const diff = daysBetween(p, dateStr);
   if (diff < 0) return null;
@@ -317,9 +350,9 @@ function patchCycleDay(dateStr) {
 const isPatchFree = (day) => day !== null && day >= 21 && day <= 27;
 const isPatchOn = (day) => day !== null && day >= 0 && day <= 20;
 
-// upcoming patch events for `weeks` weeks
+// upcoming patch events for `weeks` weeks (anchored to logged reality)
 function patchEvents(weeks = 12) {
-  const p = state.settings.patchStart;
+  const p = cycleAnchor();
   if (!p) return [];
   const start = parseISO(p);
   const horizon = addDays(today(), weeks * 7);
@@ -428,7 +461,10 @@ function assessPatch() {
 
   if (patchOn) {
     const daysOn = daysBetween(lastApply.date, tISO);
-    const num = patchNumberFor(lastApply.date);
+    // Prefer counting real applications since the cycle anchor; fall back to date-bucketing.
+    const anchor = cycleAnchor();
+    const applies = anchor ? acts.filter((x) => x.action === 'apply' && x.date >= anchor && x.date <= lastApply.date).length : 0;
+    const num = applies ? Math.min(3, applies) : patchNumberFor(lastApply.date);
     if (num === 3) {
       // 3rd patch: due to be REMOVED at +7 (start patch-free week)
       if (daysOn < 7) return { level: 'ok', title: `Patch 3 of 3 on`, message: `Remove in ${7 - daysOn} day${7 - daysOn === 1 ? '' : 's'} to begin your patch-free week.` };
@@ -458,32 +494,80 @@ function patchHistory() {
   const out = [];
   let prev = null;
   for (const a of acts) {
-    let status = 'ok', note = '';
+    // kind: how this event compares to the 7-day rhythm ('start' events aren't rated)
+    let status = 'ok', note = '', kind = 'start', delta = null, hfGap = null;
     if (a.action === 'detached') {
-      const gap = prev ? daysBetween(prev.date, a.date) : 0;
-      status = 'caution'; note = 'Patch fell off';
+      status = 'caution'; note = 'Patch fell off'; kind = 'incident';
     } else if (a.action === 'remove') {
       const gap = prev && prev.action === 'apply' ? daysBetween(prev.date, a.date) : null;
       if (gap === null) { note = 'Removed'; }
-      else if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Removed on time (7d worn)' : `Removed after ${gap}d`; }
-      else { status = 'ok'; note = `Removed ${gap - 7}d late — still protected`; }
+      else {
+        delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
+        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Removed on time (7d worn)' : `Removed ${-delta}d early`; }
+        else { status = 'ok'; note = `Removed ${delta}d late — still protected`; }
+      }
     } else { // apply
       if (!prev) { status = 'ok'; note = 'Cycle start'; }
       else if (prev.action === 'apply') { // weekly change
         const gap = daysBetween(prev.date, a.date);
-        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed early (${gap}d)`; }
-        else if (gap < 9) { status = 'caution'; note = `Changed ${gap - 7}d late (<48h) — still protected`; }
-        else { status = 'risk'; note = `Changed ${gap - 7}d late (≥48h) — protection reduced`; }
+        delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
+        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed ${-delta}d early`; }
+        else if (gap < 9) { status = 'caution'; note = `Changed ${delta}d late (<48h) — still protected`; }
+        else { status = 'risk'; note = `Changed ${delta}d late (≥48h) — protection reduced, new cycle from here`; }
       } else { // apply after a remove/detach = start of a new cycle
         const gap = daysBetween(prev.date, a.date);
-        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'New patch on time' : `Patch-free ${gap}d, new patch on`; }
+        hfGap = gap; delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
+        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'New patch on time' : `New patch ${-delta}d early`; }
         else { status = 'risk'; note = `Hormone-free ${gap}d (>7) — ovulation risk`; }
       }
     }
-    out.push({ date: a.date, action: a.action, status, note });
+    out.push({ date: a.date, action: a.action, status, note, kind, delta, hfGap });
     prev = a;
   }
   return out.reverse();
+}
+
+/* Adherence stats across everything logged in the calendar. */
+function patchAdherence() {
+  const hist = patchHistory(); // newest first
+  const rated = hist.filter((e) => e.kind === 'ontime' || e.kind === 'early' || e.kind === 'late');
+  if (!rated.length) return null;
+  const count = (k) => rated.filter((e) => e.kind === k).length;
+  const risks = hist.filter((e) => e.status === 'risk').length;
+  let streak = 0; // consecutive rated events (newest first) without reduced protection
+  for (const e of rated) { if (e.status === 'risk') break; streak++; }
+  const hfGaps = hist.filter((e) => e.hfGap != null).map((e) => e.hfGap);
+  return {
+    rated: rated.length,
+    ontime: count('ontime'),
+    early: count('early'),
+    late: count('late'),
+    risks,
+    streak,
+    protectedRate: Math.round(100 * (rated.length - rated.filter((e) => e.status === 'risk').length) / rated.length),
+    maxHF: hfGaps.length ? Math.max(...hfGaps) : null,
+  };
+}
+
+/* Symptom clustering from calendar logs. The patch-free week is only ~25% of the
+ * cycle, so symptoms landing there ≥50% of the time is a real pattern (withdrawal
+ * symptoms), not noise. We only make that one claim — no overfitting. */
+function symptomTrends() {
+  const entries = Object.entries(state.logs).filter(([, l]) => l.symptoms && l.symptoms.length);
+  if (!entries.length) return null;
+  const counts = {};
+  for (const [d, l] of entries) {
+    const cd = patchCycleDay(d);
+    const free = cd !== null && isPatchFree(cd);
+    for (const s of l.symptoms) {
+      counts[s] = counts[s] || { total: 0, free: 0 };
+      counts[s].total++;
+      if (free) counts[s].free++;
+    }
+  }
+  return Object.entries(counts)
+    .map(([sym, c]) => ({ sym, ...c, clusters: c.total >= 3 && c.free / c.total >= 0.5 }))
+    .sort((a, b) => b.total - a.total);
 }
 
 /* ============================================================ Day info ==== */
@@ -538,7 +622,7 @@ function ringArc(r, a0, a1, color, w, opacity = 1) {
   if (a1 <= a0) return '';
   const [x0, y0] = polar(50, 50, r, a0), [x1, y1] = polar(50, 50, r, a1);
   const large = (a1 - a0) > 180 ? 1 : 0;
-  return `<path d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}" stroke="${color}" stroke-width="${w}" fill="none" stroke-linecap="round"${opacity !== 1 ? ` stroke-opacity="${opacity}"` : ''}/>`;
+  return `<path class="arc" pathLength="100" d="M ${x0.toFixed(2)} ${y0.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x1.toFixed(2)} ${y1.toFixed(2)}" stroke="${color}" stroke-width="${w}" fill="none" stroke-linecap="round"${opacity !== 1 ? ` stroke-opacity="${opacity}"` : ''}/>`;
 }
 const RING_DEFS = `<defs>
   <linearGradient id="gAmber" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
@@ -682,6 +766,13 @@ function renderAlerts() {
     const dleft = daysBetween(tISO, np);
     if (dleft <= -2) box.insertAdjacentHTML('beforeend',
       `<div class="alert">${ic('calendar', 'var(--patchfree)')}<div>Your period is ${-dleft} days later than predicted.</div></div>`);
+  }
+
+  // streak encouragement — your logged changes, working for you
+  const adh = patchAdherence();
+  if (adh && adh.streak >= 3 && (!a || a.level === 'ok')) {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="alert ok">${ic('sparkle', 'var(--patch)')}<div><b>${adh.streak} changes in a row</b> with protection maintained.</div></div>`);
   }
 
   // gentle backup reminder so a year of data survives iOS storage eviction
@@ -891,6 +982,14 @@ function renderPatch() {
   $('#patchStart').value = state.settings.patchStart || '';
   $('#reminderTime').value = state.settings.reminderTime || '09:00';
   const box = $('#patchSchedule'); box.innerHTML = '';
+  // be upfront when the schedule has re-anchored to logged reality
+  const anchor = cycleAnchor();
+  if (anchor && state.settings.patchStart && anchor !== state.settings.patchStart) {
+    box.insertAdjacentHTML('beforeend',
+      `<p class="muted small">${ic('calendar', 'var(--patchfree)', 'i-ic')} Schedule follows what you actually logged —
+      your current cycle started <b>${fmtDate(anchor)}</b> (a logged patch restarted it). Reminders below and the
+      calendar export use these real dates.</p>`);
+  }
   const evs = patchEvents(10);
   if (!evs.length) { box.innerHTML = '<p class="muted small">Set your first-patch date above to see your schedule.</p>'; return; }
   const tISO = todayISO();
@@ -970,6 +1069,45 @@ function renderInsights() {
     }
   }
 
+  // symptom patterns from calendar logs
+  const st = $('#symptomTrends');
+  const trends = symptomTrends();
+  if (!trends || !trends.length) {
+    st.innerHTML = '<p class="muted small">Log symptoms on the Today screen and patterns will show up here — like whether cramps cluster in your patch-free week.</p>';
+  } else {
+    const rows = trends.slice(0, 6).map((t) =>
+      `<div class="h-item"><span>${t.sym}</span><span class="${t.clusters ? '' : 'muted'}">${t.clusters
+        ? `${ic('moon', 'var(--patchfree)', 'h-ic')} mostly patch-free week (${t.free} of ${t.total})`
+        : `${t.total}×`}</span></div>`).join('');
+    const anyCluster = trends.some((t) => t.clusters);
+    st.innerHTML = `<div class="history">${rows}</div>` + (anyCluster
+      ? `<p class="muted small" style="margin-top:8px">Symptoms clustering in the patch-free week are typical hormone-withdrawal effects. If they're rough, ask your clinician about options — some people shorten the patch-free interval under medical guidance.</p>`
+      : '');
+  }
+
+  // adherence — the honest scoreboard of everything logged in the calendar
+  const ad = $('#adherence');
+  const adh = patchAdherence();
+  if (!adh) {
+    ad.innerHTML = '<p class="muted small">Log your patch changes (Today screen or any day on the Calendar) and Petal will rate each one on time, early, or late — and track your protection.</p>';
+  } else {
+    const hfNote = adh.maxHF == null ? ''
+      : `<div class="insight-line ${adh.maxHF > 7 ? '' : 'muted'} small">${adh.maxHF > 7
+          ? ic('warn', 'var(--accent)', 'i-ic') + ` Longest hormone-free gap so far: <b>${adh.maxHF} days</b> — over the 7-day limit. That gap is when ovulation can resume.`
+          : ic('check', 'var(--ok)', 'i-ic') + ` Longest hormone-free gap so far: <b>${adh.maxHF} days</b> — within the 7-day limit.`}</div>`;
+    ad.innerHTML = `
+      <div class="insights" style="margin-bottom:10px">
+        <div class="stat"><div class="big">${adh.ontime}</div><div class="lbl">on time</div></div>
+        <div class="stat"><div class="big">${adh.early}</div><div class="lbl">early</div></div>
+        <div class="stat"><div class="big" style="color:${adh.late ? 'var(--patch)' : 'var(--text)'}">${adh.late}</div><div class="lbl">late</div></div>
+        <div class="stat"><div class="big" style="color:${adh.risks ? 'var(--accent)' : 'var(--ok)'}">${adh.risks}</div><div class="lbl">risk events</div></div>
+      </div>
+      <div class="insight-line">${adh.streak >= 2
+        ? ic('sparkle', 'var(--patch)', 'i-ic') + ` <b>${adh.streak} changes in a row</b> with protection maintained — keep it up!`
+        : ic('check', 'var(--ok)', 'i-ic') + ` Protection maintained on <b>${adh.protectedRate}%</b> of your logged changes.`}</div>
+      ${hfNote}`;
+  }
+
   // patch history (on time / late, derived from logged dates)
   const ph = $('#patchHistory'); ph.innerHTML = '';
   const STATUS_META = {
@@ -1012,9 +1150,10 @@ function variability(lengths) {
   return spread <= 3 ? 'Regular' : spread <= 7 ? 'Slightly irregular' : 'Irregular';
 }
 function patchFreeNext() {
-  if (!state.settings.patchStart) return '';
+  const anchor = cycleAnchor();
+  if (!anchor) return '';
   const evs = [];
-  const start = parseISO(state.settings.patchStart);
+  const start = parseISO(anchor);
   for (let c = 0; c < 6; c++) {
     const d = addDays(start, c * 28 + 21);
     if (d >= today()) { evs.push(iso(d)); }

@@ -46,6 +46,20 @@ h1, h2, h3, .brand, .hero-big, .hero-kicker, .stat .big {
   letter-spacing: 0.2px;
 }
 .hidden { display: none !important; }
+/* views glide in when you switch tabs (display toggle restarts the animation) */
+.view { animation: view-in .26s ease both; }
+@keyframes view-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+/* respect users who prefer less motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
 .muted { color: var(--muted); }
 .small { font-size: 13px; }
 .center { text-align: center; }
@@ -117,8 +131,10 @@ main#views {
 }
 .card-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
 .card-head h2 { font-size: 17px; margin: 0; }
-.btn { border: none; border-radius: 12px; padding: 13px 16px; font-size: 15px; font-weight: 600; color: var(--text); }
-.btn:active { transform: scale(0.98); }
+.btn { border: none; border-radius: 12px; padding: 13px 16px; font-size: 15px; font-weight: 600; color: var(--text); transition: transform .12s ease; }
+.btn:active { transform: scale(0.97); }
+.qa, .chip, .seg button, .icon-btn, .cal-cell { transition: transform .12s ease, background .15s ease; }
+.chip:active, .seg button:active, .icon-btn:active, .cal-cell:active { transform: scale(0.95); }
 .btn-primary { background: linear-gradient(135deg, var(--accent2), var(--accent)); }
 .btn-ghost { background: var(--card2); }
 .btn-danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
@@ -148,6 +164,15 @@ main#views {
   border-radius: 50%; pointer-events: none;
 }
 .ring, .ring svg { width: 100%; height: 100%; display: block; position: relative; }
+/* arcs draw themselves in, staggered per segment */
+.ring svg path.arc {
+  stroke-dasharray: 100 100; stroke-dashoffset: 100;
+  animation: sweep .8s cubic-bezier(.4, 0, .2, 1) forwards;
+}
+.ring svg path.arc:nth-of-type(2) { animation-delay: .09s; }
+.ring svg path.arc:nth-of-type(3) { animation-delay: .18s; }
+.ring svg path.arc:nth-of-type(4) { animation-delay: .27s; }
+@keyframes sweep { to { stroke-dashoffset: 0; } }
 .ring-center {
   position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; text-align: center; padding: 0 18%;
