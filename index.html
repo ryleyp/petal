@@ -179,6 +179,12 @@
             <label>Remind me at</label>
             <input id="reminderTime" type="time" value="09:00" />
           </div>
+          <div class="log-row">
+            <label>Patches you have on hand (for refill reminders)</label>
+            <input id="patchesLeft" type="number" min="0" max="60" placeholder="e.g. 3 — leave blank to skip" />
+            <p class="muted small" style="margin:6px 0 0">Each application you log uses one.
+              Petal warns you before you'd run out, so a missing patch never makes you late.</p>
+          </div>
           <button id="savePatch" class="btn btn-primary full">Save schedule</button>
         </div>
 
@@ -198,6 +204,10 @@
         <div class="card">
           <div class="card-head"><h2>Your cycle</h2></div>
           <div id="insights" class="insights"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Cycle comparison</h2></div>
+          <div id="cycleCompare"></div>
         </div>
         <div class="card">
           <div class="card-head"><h2>Ovulation &amp; fertility</h2></div>
@@ -246,6 +256,7 @@
           <div class="card-head"><h2>Security &amp; data</h2></div>
           <button id="changePass" class="btn btn-ghost full">Change passcode</button>
           <button id="exportData" class="btn btn-ghost full">Export encrypted backup</button>
+          <button id="exportReport" class="btn btn-ghost full">Export doctor’s report (readable)</button>
           <label class="btn btn-ghost full file-label">
             Import backup<input id="importData" type="file" accept=".json,application/json" hidden />
           </label>

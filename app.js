@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v13'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v14'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -78,7 +78,8 @@ function defaultState() {
   return {
     version: 2,
     settings: { cycleLen: 28, lutealLen: 14, onPatch: true, patchStart: null,
-      reminderTime: '09:00', patchDayOfWeek: null, lastBackup: null },
+      reminderTime: '09:00', patchDayOfWeek: null, lastBackup: null,
+      patchesLeft: null, customSymptoms: [] },
     periods: [],                 // [{ start:'YYYY-MM-DD', end:'YYYY-MM-DD'|null }]
     logs: {},                    // { 'YYYY-MM-DD': { flow, symptoms:[], notes } }
     patchActions: [],            // [{ date:'YYYY-MM-DD', action:'apply'|'remove'|'detached' }]
@@ -293,6 +294,13 @@ function cycleStats() {
   };
 }
 
+// Honest caption for how much data backs a prediction.
+function predictionConfidence() {
+  const n = cycleStats().lengths.length;
+  if (!n) return 'based on your starting cycle length — log periods to personalize';
+  return `based on ${n} logged cycle${n === 1 ? '' : 's'}`;
+}
+
 /* predicted next period start (natural cycle) */
 function predictNextPeriod() {
   const s = cycleStats();
@@ -374,6 +382,20 @@ function patchEvents(weeks = 12) {
     cycle++;
     if (cycle > weeks) return events; // safety
   }
+}
+
+/* When does the current patch supply run out? Every upcoming application
+ * (new-cycle apply or weekly change) consumes one patch. */
+function refillStatus() {
+  const left = state.settings.patchesLeft;
+  if (left == null || !state.settings.onPatch || !cycleAnchor()) return null;
+  const uses = patchEvents(26).filter((e) => e.type === 'apply' || e.type === 'change');
+  if (!uses.length) return null;
+  if (left === 0) return { level: 'risk', left, outDate: uses[0].date, daysTo: daysBetween(todayISO(), uses[0].date) };
+  if (left >= uses.length) return { level: 'ok', left, outDate: null, daysTo: null };
+  const outDate = uses[left].date; // the first application you can't cover
+  const daysTo = daysBetween(todayISO(), outDate);
+  return { level: daysTo <= 7 ? 'risk' : (daysTo <= 21 ? 'caution' : 'ok'), left, outDate, daysTo };
 }
 
 // which patch number a given apply-date corresponds to within the ideal cycle
@@ -715,7 +737,7 @@ function renderToday() {
     const dleft = daysBetween(tISO, np);
     const s = cycleStats();
     const cyc = s.lastStart ? daysBetween(s.lastStart, tISO) + 1 : null;
-    const sub = cyc ? `Cycle day ${cyc}` : '';
+    const sub = (cyc ? `Cycle day ${cyc} · ` : '') + predictionConfidence();
     if (dleft > 0) setHero('Next period', dleft, `${dayWord(dleft)} away · ${fmtDate(np)}`, sub);
     else if (dleft === 0) setHero('Next period', 'Today', 'expected — log it when it starts', sub, true);
     else setHero('Period', -dleft, `${dayWord(-dleft)} late · log it when it starts`, sub);
@@ -768,6 +790,16 @@ function renderAlerts() {
       `<div class="alert">${ic('calendar', 'var(--patchfree)')}<div>Your period is ${-dleft} days later than predicted.</div></div>`);
   }
 
+  // refill warning — an empty box is how late applications happen
+  const rf = refillStatus();
+  if (rf && rf.level !== 'ok') {
+    const msg = rf.left === 0
+      ? `<b>You're out of patches.</b> Your next application is ${fmtDate(rf.outDate)} — refill your prescription now.`
+      : `<b>${rf.left} patch${rf.left === 1 ? '' : 'es'} left.</b> You'll run out around ${fmtDate(rf.outDate)} — refill before then.`;
+    box.insertAdjacentHTML('beforeend',
+      `<div class="alert ${rf.level === 'risk' ? 'due' : ''}">${ic(rf.level === 'risk' ? 'warn' : 'clock', rf.level === 'risk' ? 'var(--accent)' : 'var(--patch)')}<div>${msg}</div></div>`);
+  }
+
   // streak encouragement — your logged changes, working for you
   const adh = patchAdherence();
   if (adh && adh.streak >= 3 && (!a || a.level === 'ok')) {
@@ -807,14 +839,38 @@ $('#flowSeg').addEventListener('click', (e) => {
   $$('#flowSeg button').forEach((x) => x.classList.toggle('on', x === b));
 });
 
+function allSymptoms() {
+  return SYMPTOMS.concat(state.settings.customSymptoms || []);
+}
 function buildSymptomChips() {
   const box = $('#symptomChips'); box.innerHTML = '';
-  SYMPTOMS.forEach((s) => {
+  allSymptoms().forEach((s) => {
     const c = document.createElement('button');
     c.className = 'chip'; c.dataset.sym = s; c.textContent = s; c.type = 'button';
     c.addEventListener('click', () => c.classList.toggle('on'));
     box.appendChild(c);
   });
+  // "+" chip: add your own; typing an existing custom one offers to remove it
+  const add = document.createElement('button');
+  add.className = 'chip chip-add'; add.textContent = '+ Add'; add.type = 'button';
+  add.addEventListener('click', () => {
+    const name = (prompt('Track your own symptom or tag (e.g. “Migraine aura”, “Skipped coffee”):') || '').trim();
+    if (!name) return;
+    const customs = state.settings.customSymptoms || [];
+    const existing = customs.find((c) => c.toLowerCase() === name.toLowerCase());
+    if (existing) {
+      if (confirm(`“${existing}” already exists. Remove it from your chips? (Past logs keep it.)`)) {
+        state.settings.customSymptoms = customs.filter((c) => c !== existing);
+        saveState(); buildSymptomChips(); renderToday(); toast('Tag removed');
+      }
+      return;
+    }
+    if (SYMPTOMS.some((c) => c.toLowerCase() === name.toLowerCase())) { toast('That one’s already built in'); return; }
+    customs.push(name.slice(0, 24));
+    state.settings.customSymptoms = customs;
+    saveState(); buildSymptomChips(); renderToday(); toast('Tag added');
+  });
+  box.appendChild(add);
 }
 
 // quick actions
@@ -837,13 +893,23 @@ function logPatchActionOn(ds, action) {
     state.settings.patchStart = ds;
     state.settings.onPatch = true;
   }
+  const before = (state.patchActions || []).length;
   recordPatchAction(action, ds);
+  // each newly-logged application uses one patch from the box
+  if (action === 'apply' && state.patchActions.length > before && state.settings.patchesLeft != null) {
+    state.settings.patchesLeft = Math.max(0, state.settings.patchesLeft - 1);
+  }
   saveState(); hydrateSettings(); renderAll();
-  flashAssessment(action === 'apply' ? 'Patch applied 🩹' : 'Patch removed 🌙');
+  flashAssessment(action === 'apply' ? 'Patch applied' : 'Patch removed');
 }
 // Remove logged patch action(s) on a given date (to fix a mistake).
 function unlogPatchActionOn(ds, action) {
+  const before = (state.patchActions || []).length;
   state.patchActions = (state.patchActions || []).filter((a) => !(a.date === ds && a.action === action));
+  // undoing a logged application puts the patch back in the box
+  if (action === 'apply' && state.patchActions.length < before && state.settings.patchesLeft != null) {
+    state.settings.patchesLeft += 1;
+  }
   saveState(); renderAll(); toast('Removed log');
 }
 function patchActionsOn(ds) { return (state.patchActions || []).filter((a) => a.date === ds); }
@@ -981,6 +1047,7 @@ function renderPatch() {
   }
   $('#patchStart').value = state.settings.patchStart || '';
   $('#reminderTime').value = state.settings.reminderTime || '09:00';
+  $('#patchesLeft').value = state.settings.patchesLeft ?? '';
   const box = $('#patchSchedule'); box.innerHTML = '';
   // be upfront when the schedule has re-anchored to logged reality
   const anchor = cycleAnchor();
@@ -1008,9 +1075,11 @@ $('#savePatch').addEventListener('click', () => {
   const v = $('#patchStart').value;
   state.settings.patchStart = v || null;
   state.settings.reminderTime = $('#reminderTime').value || '09:00';
+  const pl = $('#patchesLeft').value.trim();
+  state.settings.patchesLeft = pl === '' ? null : clampNum(pl, 0, 60, null);
   if (v) state.settings.onPatch = true;
   saveState(); hydrateSettings(); renderAll(); scheduleReminderTimer();
-  toast('Patch schedule saved 🩹');
+  toast('Patch schedule saved');
 });
 $('#exportIcs').addEventListener('click', exportICS);
 
@@ -1062,11 +1131,40 @@ function renderInsights() {
         <div class="insight-line">${ic('sparkle', 'var(--ovul)', 'i-ic')} Estimated <b>ovulation: ${fmtDate(ovul)}</b>
         (about ${state.settings.lutealLen} days before your next predicted period).</div>
         <div class="insight-line">${ic('drop', 'var(--fertile)', 'i-ic')} Most fertile window: <b>${fmtDate(fStart)} – ${fmtDate(ovul)}</b>.</div>
-        <div class="insight-line muted small">This is an estimate from your average cycle and luteal
+        <div class="insight-line muted small">Estimate ${predictionConfidence()}, using your average cycle and luteal
         phase — actual ovulation varies. Not a contraceptive method.</div>`;
     } else {
       ob.innerHTML = '<div class="insight-line muted">Log a couple of periods to estimate ovulation.</div>';
     }
+  }
+
+  // cycle comparison — each cycle as a bar aligned to day 1 (bleed in pink)
+  const cc = $('#cycleCompare');
+  const psAsc = sortedPeriods();
+  if (psAsc.length < 2) {
+    cc.innerHTML = '<p class="muted small">Log at least two periods and each cycle shows up here as a bar — regularity at a glance.</p>';
+  } else {
+    const cycles = [];
+    for (let i = 0; i < psAsc.length; i++) {
+      const startD = psAsc[i].start;
+      const next = psAsc[i + 1];
+      const len = next ? daysBetween(startD, next.start) : daysBetween(startD, todayISO()) + 1;
+      const bleed = psAsc[i].end ? daysBetween(startD, psAsc[i].end) + 1 : Math.min(len, 5);
+      if (len >= 1 && len <= 60) cycles.push({ start: startD, len, bleed: Math.min(bleed, len), ongoing: !next });
+    }
+    const show = cycles.slice(-6).reverse(); // newest first
+    const maxLen = Math.max(...show.map((c) => c.len), state.settings.cycleLen);
+    cc.innerHTML = show.map((c) => `
+      <div class="cyc-row">
+        <span class="cyc-date">${fmtDate(c.start, { month: 'short', day: 'numeric' })}</span>
+        <div class="cyc-track">
+          <div class="cyc-fill${c.ongoing ? ' ongoing' : ''}" style="width:${Math.round(100 * c.len / maxLen)}%">
+            <i class="cyc-bleed" style="width:${Math.round(100 * c.bleed / c.len)}%"></i>
+          </div>
+        </div>
+        <span class="cyc-len">${c.len}d${c.ongoing ? '…' : ''}</span>
+      </div>`).join('') +
+      `<p class="muted small" style="margin:8px 0 0">Pink = bleeding days. Bars line up at day 1${state.settings.onPatch ? ' — on the patch these are withdrawal bleeds' : ''}.</p>`;
   }
 
   // symptom patterns from calendar logs
@@ -1168,6 +1266,7 @@ function hydrateSettings() {
   $('#onPatch').checked = !!state.settings.onPatch;
   $('#patchStart').value = state.settings.patchStart || '';
   $('#reminderTime').value = state.settings.reminderTime || '09:00';
+  $('#patchesLeft').value = state.settings.patchesLeft ?? '';
 }
 $('#saveSettings').addEventListener('click', () => {
   state.settings.cycleLen = clampNum($('#cycleLen').value, 20, 45, 28);
@@ -1209,6 +1308,49 @@ $('#importData').addEventListener('change', (e) => {
   };
   r.readAsText(file);
 });
+/* Doctor's report — a clean, human-readable summary you can print or show at an
+ * appointment. Generated entirely on-device; plainly NOT encrypted, so we say so. */
+function buildDoctorReport() {
+  const s = cycleStats();
+  const adh = patchAdherence();
+  const trends = symptomTrends() || [];
+  const psDesc = sortedPeriods().slice().reverse().slice(0, 12);
+  const hist = patchHistory().slice(0, 14);
+  const row = (a, b) => `<tr><td>${a}</td><td>${b}</td></tr>`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Petal — cycle report</title>
+<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222;line-height:1.5}
+h1{font-size:22px}h2{font-size:16px;margin-top:26px;border-bottom:1px solid #ddd;padding-bottom:4px}
+table{border-collapse:collapse;width:100%;font-size:14px}td{padding:5px 8px;border-bottom:1px solid #eee}
+.meta{color:#666;font-size:13px}.warn{color:#a33}</style></head><body>
+<h1>Cycle &amp; contraception report</h1>
+<p class="meta">Generated ${new Date().toLocaleDateString()} from Petal (self-tracked data — accuracy depends on what was logged).</p>
+<h2>Summary</h2><table>
+${row('Contraception', state.settings.onPatch ? 'Combined hormonal patch (3 weeks on / 1 week patch-free)' : 'None recorded / natural cycle')}
+${row('Average cycle length', `${s.avgCycle} days (${s.lengths.length} measured cycle${s.lengths.length === 1 ? '' : 's'})`)}
+${row('Average bleed length', s.avgPeriod ? `${s.avgPeriod} days` : 'not enough data')}
+${row('Regularity', variability(s.lengths))}
+${adh ? row('Patch changes logged', `${adh.rated} rated — ${adh.ontime} on time, ${adh.early} early, ${adh.late} late; ${adh.risks} with possible reduced protection`) : ''}
+${adh && adh.maxHF != null ? row('Longest hormone-free interval', `${adh.maxHF} days ${adh.maxHF > 7 ? '(exceeded the 7-day limit)' : '(within the 7-day limit)'}`) : ''}
+</table>
+<h2>Recent bleeds</h2><table>
+${psDesc.map((p) => row(fmtDate(p.start, { year: 'numeric', month: 'short', day: 'numeric' }),
+  p.end ? `${daysBetween(p.start, p.end) + 1} days (to ${fmtDate(p.end, { month: 'short', day: 'numeric' })})` : 'ongoing / end not logged')).join('') || row('—', 'none logged')}
+</table>
+${hist.length ? `<h2>Recent patch events</h2><table>
+${hist.map((e) => row(`${fmtDate(e.date, { year: 'numeric', month: 'short', day: 'numeric' })} — ${e.action}`, e.note)).join('')}
+</table>` : ''}
+${trends.length ? `<h2>Symptoms</h2><table>
+${trends.slice(0, 8).map((t) => row(t.sym, `${t.total}× logged${t.clusters ? ` — ${t.free} of ${t.total} during the patch-free week` : ''}`)).join('')}
+</table>` : ''}
+<p class="meta warn">This file is not encrypted. Share it only with people you trust, and delete copies you no longer need.</p>
+</body></html>`;
+}
+$('#exportReport').addEventListener('click', () => {
+  if (!confirm('This creates a READABLE (unencrypted) summary for a clinician. Only share it with people you trust. Continue?')) return;
+  downloadBlob(new Blob([buildDoctorReport()], { type: 'text/html' }), `petal-report-${todayISO()}.html`);
+  toast('Report exported — open or AirDrop it');
+});
+
 $('#eraseData').addEventListener('click', () => {
   if (confirm('Erase ALL data permanently? This cannot be undone.')) { localStorage.removeItem(VAULT); location.reload(); }
 });
@@ -1274,10 +1416,27 @@ function exportICS() {
     lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Patch reminder', 'TRIGGER:-PT0M', 'END:VALARM');
     lines.push('END:VEVENT');
   });
+  // refill reminder ~5 days before the supply runs out
+  const rf = refillStatus();
+  if (rf && rf.outDate) {
+    const remind = addDays(parseISO(rf.outDate), -5);
+    const dt = remind < today() ? addDays(today(), 1) : remind;
+    dt.setHours(h, m, 0, 0);
+    const end = new Date(dt.getTime() + 15 * 60000);
+    lines.push('BEGIN:VEVENT');
+    lines.push(`UID:petal-refill-${rf.outDate}@petal.local`);
+    lines.push(`DTSTAMP:${stamp}`);
+    lines.push(`DTSTART:${toICSStamp(dt)}`);
+    lines.push(`DTEND:${toICSStamp(end)}`);
+    lines.push('SUMMARY:💊 Refill patch prescription');
+    lines.push(`DESCRIPTION:Petal: your patch supply runs out around ${rf.outDate}`);
+    lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Refill reminder', 'TRIGGER:-PT0M', 'END:VALARM');
+    lines.push('END:VEVENT');
+  }
   lines.push('END:VCALENDAR');
   const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar' });
   downloadBlob(blob, 'petal-patch-reminders.ics');
-  toast('Calendar file ready 📅');
+  toast('Calendar file ready');
 }
 function toICSStamp(d) {
   return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + 'T' + pad(d.getHours()) + pad(d.getMinutes()) + '00';

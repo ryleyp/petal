@@ -223,6 +223,7 @@ main#views {
 .chips { display: flex; flex-wrap: wrap; gap: 7px; }
 .chip { background: var(--card2); border: 1px solid #4a3a7a; color: var(--muted); border-radius: 999px; padding: 7px 12px; font-size: 13px; }
 .chip.on { background: var(--accent2); border-color: var(--accent2); color: #fff; }
+.chip-add { border-style: dashed; color: var(--muted); }
 .switch-row { display: flex; align-items: center; justify-content: space-between; padding: 6px 0 14px; }
 .switch-row input { width: 22px; height: 22px; accent-color: var(--accent); }
 
@@ -276,6 +277,15 @@ main#views {
 .d-tag { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
 .d-tag .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .disclaimer { color: var(--muted); font-size: 12px; line-height: 1.5; text-align: center; padding: 0 8px; }
+
+/* ---------- Cycle comparison bars ---------- */
+.cyc-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; font-size: 12px; }
+.cyc-date { width: 48px; color: var(--muted); flex: 0 0 auto; }
+.cyc-len { width: 36px; text-align: right; color: var(--muted); flex: 0 0 auto; }
+.cyc-track { flex: 1; height: 13px; border-radius: 999px; background: rgba(255,255,255,0.05); overflow: hidden; }
+.cyc-fill { height: 100%; display: flex; border-radius: 999px; overflow: hidden; background: #453a76; }
+.cyc-fill.ongoing { opacity: 0.6; }
+.cyc-bleed { display: block; height: 100%; background: linear-gradient(90deg, #ff85a6, var(--period)); }
 
 /* ---------- Patch helper & status ---------- */
 .helper-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 6px 0 10px; }
