@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v14'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v15'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -79,10 +79,11 @@ function defaultState() {
     version: 2,
     settings: { cycleLen: 28, lutealLen: 14, onPatch: true, patchStart: null,
       reminderTime: '09:00', patchDayOfWeek: null, lastBackup: null,
-      patchesLeft: null, customSymptoms: [] },
+      patchesLeft: null, patchExpiry: null, customSymptoms: [], doctorQuestions: [] },
     periods: [],                 // [{ start:'YYYY-MM-DD', end:'YYYY-MM-DD'|null }]
-    logs: {},                    // { 'YYYY-MM-DD': { flow, symptoms:[], notes } }
-    patchActions: [],            // [{ date:'YYYY-MM-DD', action:'apply'|'remove'|'detached' }]
+    logs: {},                    // { 'YYYY-MM-DD': { flow, bleedType, symptoms:[], tags:[], notes } }
+    patchActions: [],            // [{ date:'YYYY-MM-DD', action:'apply'|'remove'|'detached', site }]
+    appointments: [],            // [{ id, date:'YYYY-MM-DD', label, type:'appointment'|'refill' }]
   };
 }
 
@@ -114,7 +115,20 @@ function toast(msg) {
 }
 
 const SYMPTOMS = ['Cramps', 'Headache', 'Bloating', 'Tender breasts', 'Acne', 'Fatigue',
-  'Mood swings', 'Nausea', 'Back pain', 'Cravings', 'Low energy', 'High energy'];
+  'Mood swings', 'Anxiety', 'Irritability', 'Stress', 'Poor sleep', 'Nausea',
+  'Back pain', 'Cravings', 'Low energy', 'High energy', 'Clots', 'Brown discharge'];
+
+// Approved patch sites (per combined-patch labeling: never on breasts)
+const SITES = ['Left arm', 'Right arm', 'Abdomen', 'Left buttock', 'Right buttock', 'Upper back'];
+
+// Private log tags (sex / EC / tests) — stored only in the encrypted day log
+const INTIMACY = [
+  ['sex-protected', 'Protected sex'],
+  ['sex-unprotected', 'Unprotected sex'],
+  ['ec', 'EC taken'],
+  ['test-neg', 'Test: negative'],
+  ['test-pos', 'Test: positive'],
+];
 
 /* Flow strength as a cute droplet whose size + colour grows with intensity. */
 const FLOWS = [['', 'None'], ['spotting', 'Spotting'], ['light', 'Light'], ['medium', 'Medium'], ['heavy', 'Heavy']];
@@ -226,6 +240,7 @@ function migrate() {
   state.periods = state.periods || [];
   state.logs = state.logs || {};
   state.patchActions = state.patchActions || [];
+  state.appointments = state.appointments || [];
 }
 
 function openApp() {
@@ -549,6 +564,56 @@ function patchHistory() {
   return out.reverse();
 }
 
+/* Date ranges when protection was plausibly reduced, derived from logged actions:
+ * a weekly change ≥48h late (protection wanes ~9 days after the previous patch)
+ * or a hormone-free stretch >7 days. Each window runs until 7 days after the
+ * restart patch (the standard back-up window). Used to cross-reference logged
+ * unprotected sex — honestly, without fake precision. */
+function riskWindows() {
+  const ws = [];
+  let prev = null;
+  for (const a of sortedActions()) {
+    if (a.action === 'apply' && prev) {
+      const gap = daysBetween(prev.date, a.date);
+      if (prev.action === 'apply' && gap >= 9) {
+        ws.push({ from: iso(addDays(parseISO(prev.date), 9)), to: iso(addDays(parseISO(a.date), 7)) });
+      } else if ((prev.action === 'remove' || prev.action === 'detached') && gap > 7) {
+        ws.push({ from: iso(addDays(parseISO(prev.date), 8)), to: iso(addDays(parseISO(a.date), 7)) });
+      }
+    }
+    prev = a;
+  }
+  // still overdue right now → window is open-ended through today
+  if (prev) {
+    const t = todayISO();
+    if (prev.action === 'apply' && daysBetween(prev.date, t) >= 9) {
+      ws.push({ from: iso(addDays(parseISO(prev.date), 9)), to: iso(addDays(today(), 7)) });
+    } else if ((prev.action === 'remove' || prev.action === 'detached') && daysBetween(prev.date, t) > 7) {
+      ws.push({ from: iso(addDays(parseISO(prev.date), 8)), to: iso(addDays(today(), 7)) });
+    }
+  }
+  return ws;
+}
+const inRiskWindow = (d) => riskWindows().some((w) => d >= w.from && d <= w.to);
+
+// Cross-reference risk windows against logged unprotected sex. Factual, date-based —
+// never a fabricated probability.
+function riskCrossref() {
+  const windows = riskWindows();
+  const hits = [];
+  for (const w of windows) {
+    let d = parseISO(w.from);
+    const end = parseISO(w.to);
+    while (d <= end) {
+      const ds = iso(d);
+      const log = state.logs[ds];
+      if (log && log.tags && log.tags.includes('sex-unprotected')) hits.push(ds);
+      d = addDays(d, 1);
+    }
+  }
+  return { windows, hits: [...new Set(hits)] };
+}
+
 /* Adherence stats across everything logged in the calendar. */
 function patchAdherence() {
   const hist = patchHistory(); // newest first
@@ -571,25 +636,55 @@ function patchAdherence() {
   };
 }
 
-/* Symptom clustering from calendar logs. The patch-free week is only ~25% of the
- * cycle, so symptoms landing there ≥50% of the time is a real pattern (withdrawal
- * symptoms), not noise. We only make that one claim — no overfitting. */
+// Which quarter of the 28-day patch cycle a date falls in, or null off-patch.
+function cyclePosition(dateStr) {
+  const cd = patchCycleDay(dateStr);
+  if (cd === null) return null;
+  if (isPatchFree(cd)) return 'free';
+  return 'week' + (Math.floor(cd / 7) + 1);
+}
+const WINDOW_LABEL = { week1: 'Week 1', week2: 'Week 2', week3: 'Week 3', free: 'the patch-free week' };
+
+/* Symptom clustering from calendar logs, broken down by position in the 28-day
+ * patch cycle. A symptom "clusters" in a window only when there's real signal:
+ * ≥3 logs AND ≥50% of them land in one window (each window is ~25% of the
+ * cycle, so 50%+ is a genuine pattern, not noise). We only make that one claim
+ * per symptom — no overfitting into vague trend lines. */
 function symptomTrends() {
   const entries = Object.entries(state.logs).filter(([, l]) => l.symptoms && l.symptoms.length);
   if (!entries.length) return null;
   const counts = {};
   for (const [d, l] of entries) {
-    const cd = patchCycleDay(d);
-    const free = cd !== null && isPatchFree(cd);
+    const pos = cyclePosition(d);
     for (const s of l.symptoms) {
-      counts[s] = counts[s] || { total: 0, free: 0 };
+      counts[s] = counts[s] || { total: 0, week1: 0, week2: 0, week3: 0, free: 0 };
       counts[s].total++;
-      if (free) counts[s].free++;
+      if (pos) counts[s][pos]++;
     }
   }
-  return Object.entries(counts)
-    .map(([sym, c]) => ({ sym, ...c, clusters: c.total >= 3 && c.free / c.total >= 0.5 }))
-    .sort((a, b) => b.total - a.total);
+  return Object.entries(counts).map(([sym, c]) => {
+    let dominant = null, share = 0;
+    for (const w of ['week1', 'week2', 'week3', 'free']) {
+      const s = c.total ? c[w] / c.total : 0;
+      if (s > share) { share = s; dominant = w; }
+    }
+    const clusters = c.total >= 3 && share >= 0.5;
+    return { sym, ...c, clusters, dominant: clusters ? dominant : null, dominantLabel: clusters ? WINDOW_LABEL[dominant] : null, share };
+  }).sort((a, b) => b.total - a.total);
+}
+
+/* "You typically begin bleeding N days after removing your patch" — averaged
+ * across cycles where a period start follows a logged removal within 10 days. */
+function bleedTimingInsight() {
+  const removals = sortedActions().filter((a) => a.action === 'remove');
+  if (!removals.length) return null;
+  const deltas = [];
+  for (const p of sortedPeriods()) {
+    const cand = removals.filter((r) => { const d = daysBetween(r.date, p.start); return d >= 0 && d <= 10; });
+    if (cand.length) deltas.push(daysBetween(cand[cand.length - 1].date, p.start));
+  }
+  if (deltas.length < 2) return null;
+  return { avg: Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length), n: deltas.length };
 }
 
 /* ============================================================ Day info ==== */
@@ -636,7 +731,7 @@ function dayInfo(dateStr) {
 }
 
 /* ============================================================ Render ====== */
-function renderAll() { renderToday(); renderCalendar(); renderPatch(); renderInsights(); }
+function renderAll() { renderToday(); renderCalendar(); renderPatch(); renderInsights(); renderAppointments(); renderDoctorQuestions(); }
 
 /* ---- Cycle ring (Clue-style) ---- */
 function polar(cx, cy, r, a) { const rad = (a - 90) * Math.PI / 180; return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)]; }
@@ -722,6 +817,12 @@ function renderToday() {
   };
   const dayWord = (n) => `day${n === 1 ? '' : 's'}`;
   if (state.settings.onPatch && cd !== null) {
+    // where the patch currently on your skin is placed (if logged)
+    const acts = sortedActions();
+    const lastApply = [...acts].reverse().find((x) => x.action === 'apply');
+    const lastOff = [...acts].reverse().find((x) => x.action === 'remove' || x.action === 'detached');
+    const wornSite = lastApply && (!lastOff || lastApply.date >= lastOff.date) && lastApply.site
+      ? ` · on ${lastApply.site.toLowerCase()}` : '';
     if (isPatchFree(cd)) {
       const back = 28 - cd;
       setHero('Patch-free week', back, `${dayWord(back)} until new patch`,
@@ -731,7 +832,7 @@ function renderToday() {
       const left = week === 3 ? 21 - cd : 7 - (cd % 7);
       setHero(`Patch week ${week}`, left,
         `${dayWord(left)} until ${week === 3 ? 'removal' : 'patch change'}`,
-        `Day ${cd + 1} of 28`);
+        `Day ${cd + 1} of 28${wornSite}`);
     }
   } else if (np) {
     const dleft = daysBetween(tISO, np);
@@ -748,9 +849,12 @@ function renderToday() {
   renderAlerts();
 
   // today's log fields
-  const log = state.logs[tISO] || { flow: '', symptoms: [], notes: '' };
+  const log = state.logs[tISO] || { flow: '', bleedType: '', symptoms: [], tags: [], notes: '' };
   $$('#flowSeg button').forEach((b) => b.classList.toggle('on', (b.dataset.val || '') === (log.flow || '')));
+  $('#bleedTypeRow').classList.toggle('inactive', !log.flow);
+  $$('#bleedTypeSeg button').forEach((b) => b.classList.toggle('on', (b.dataset.val || '') === (log.bleedType || '')));
   $$('#symptomChips .chip').forEach((c) => c.classList.toggle('on', (log.symptoms || []).includes(c.dataset.sym)));
+  $$('#intimacyChips .chip').forEach((c) => c.classList.toggle('on', (log.tags || []).includes(c.dataset.tag)));
   $('#todayNotes').value = log.notes || '';
 }
 
@@ -790,6 +894,17 @@ function renderAlerts() {
       `<div class="alert">${ic('calendar', 'var(--patchfree)')}<div>Your period is ${-dleft} days later than predicted.</div></div>`);
   }
 
+  // prescription/box expiration
+  if (state.settings.patchExpiry) {
+    const dExp = daysBetween(tISO, state.settings.patchExpiry);
+    if (dExp <= 30) {
+      box.insertAdjacentHTML('beforeend',
+        `<div class="alert${dExp <= 7 ? ' due' : ''}">${ic(dExp <= 7 ? 'warn' : 'clock', dExp <= 7 ? 'var(--accent)' : 'var(--patch)')}<div>${dExp < 0
+          ? `<b>Your patch prescription expired ${fmtDate(state.settings.patchExpiry)}.</b> Check with your pharmacy before using it.`
+          : `<b>Expires ${fmtDate(state.settings.patchExpiry)}</b> (${dExp} day${dExp === 1 ? '' : 's'}) — plan a refill.`}</div></div>`);
+    }
+  }
+
   // refill warning — an empty box is how late applications happen
   const rf = refillStatus();
   if (rf && rf.level !== 'ok') {
@@ -798,6 +913,25 @@ function renderAlerts() {
       : `<b>${rf.left} patch${rf.left === 1 ? '' : 'es'} left.</b> You'll run out around ${fmtDate(rf.outDate)} — refill before then.`;
     box.insertAdjacentHTML('beforeend',
       `<div class="alert ${rf.level === 'risk' ? 'due' : ''}">${ic(rf.level === 'risk' ? 'warn' : 'clock', rf.level === 'risk' ? 'var(--accent)' : 'var(--patch)')}<div>${msg}</div></div>`);
+  }
+
+  // upcoming appointments / refills (next 2 days)
+  for (const ap of (state.appointments || [])) {
+    const dleft = daysBetween(tISO, ap.date);
+    if (dleft >= 0 && dleft <= 2) {
+      box.insertAdjacentHTML('beforeend',
+        `<div class="alert">${ic('calendar', 'var(--ovul)')}<div><b>${dleft === 0 ? 'Today' : dleft === 1 ? 'Tomorrow' : 'In 2 days'}:</b> ${escapeHtml(ap.label)}.</div></div>`);
+    }
+  }
+
+  // unprotected sex logged during a reduced-protection window (recent = actionable)
+  const rc = riskCrossref();
+  const recentHit = rc.hits.find((h) => daysBetween(h, tISO) <= 5);
+  if (recentHit) {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="alert due">${ic('warn', 'var(--accent)')}<div><b>Unprotected sex logged ${fmtDate(recentHit)} — protection may have been reduced then.</b>
+      Emergency contraception is most effective the sooner it's taken (within 3–5 days). A pharmacist can help today, no appointment needed.
+      <div class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</div></div></div>`);
   }
 
   // streak encouragement — your logged changes, working for you
@@ -823,10 +957,12 @@ function maybeBackupReminder(box) {
 $('#saveToday').addEventListener('click', () => {
   const tISO = todayISO();
   const flow = ($('#flowSeg button.on') || {}).dataset?.val ?? '';
+  const bleedType = flow ? (($('#bleedTypeSeg button.on') || {}).dataset?.val ?? '') : '';
   const symptoms = $$('#symptomChips .chip.on').map((c) => c.dataset.sym);
+  const tags = $$('#intimacyChips .chip.on').map((c) => c.dataset.tag);
   const notes = $('#todayNotes').value.trim();
-  if (!flow && !symptoms.length && !notes) { delete state.logs[tISO]; }
-  else state.logs[tISO] = { flow, symptoms, notes };
+  if (!flow && !symptoms.length && !tags.length && !notes) { delete state.logs[tISO]; }
+  else state.logs[tISO] = { flow, bleedType, symptoms, tags, notes };
   // auto-create period when flow logged and none open
   if (flow && flow !== 'spotting' && !openPeriod() && !state.periods.some((p) => p.start === tISO)) {
     state.periods.push({ start: tISO, end: null });
@@ -837,6 +973,11 @@ $('#saveToday').addEventListener('click', () => {
 $('#flowSeg').addEventListener('click', (e) => {
   const b = e.target.closest('button'); if (!b) return;
   $$('#flowSeg button').forEach((x) => x.classList.toggle('on', x === b));
+  $('#bleedTypeRow').classList.toggle('inactive', !b.dataset.val);
+});
+$('#bleedTypeSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  $$('#bleedTypeSeg button').forEach((x) => x.classList.toggle('on', x === b));
 });
 
 function allSymptoms() {
@@ -850,6 +991,7 @@ function buildSymptomChips() {
     c.addEventListener('click', () => c.classList.toggle('on'));
     box.appendChild(c);
   });
+  buildIntimacyChips();
   // "+" chip: add your own; typing an existing custom one offers to remove it
   const add = document.createElement('button');
   add.className = 'chip chip-add'; add.textContent = '+ Add'; add.type = 'button';
@@ -871,6 +1013,16 @@ function buildSymptomChips() {
     saveState(); buildSymptomChips(); renderToday(); toast('Tag added');
   });
   box.appendChild(add);
+}
+function buildIntimacyChips() {
+  const box = $('#intimacyChips'); if (!box) return;
+  box.innerHTML = '';
+  INTIMACY.forEach(([tag, label]) => {
+    const c = document.createElement('button');
+    c.className = 'chip'; c.dataset.tag = tag; c.textContent = label; c.type = 'button';
+    c.addEventListener('click', () => c.classList.toggle('on'));
+    box.appendChild(c);
+  });
 }
 
 // quick actions
@@ -895,12 +1047,63 @@ function logPatchActionOn(ds, action) {
   }
   const before = (state.patchActions || []).length;
   recordPatchAction(action, ds);
+  const isNew = state.patchActions.length > before;
   // each newly-logged application uses one patch from the box
-  if (action === 'apply' && state.patchActions.length > before && state.settings.patchesLeft != null) {
+  if (action === 'apply' && isNew && state.settings.patchesLeft != null) {
     state.settings.patchesLeft = Math.max(0, state.settings.patchesLeft - 1);
   }
   saveState(); hydrateSettings(); renderAll();
   flashAssessment(action === 'apply' ? 'Patch applied' : 'Patch removed');
+  if (action === 'apply' && isNew) promptSiteFor(ds);
+}
+
+/* ---- Placement & rotation ---- */
+function siteOf(dateStr) {
+  const a = (state.patchActions || []).find((x) => x.date === dateStr && x.action === 'apply');
+  return a ? a.site || null : null;
+}
+function lastSiteBefore(dateStr) {
+  const prior = sortedActions().filter((a) => a.action === 'apply' && a.site && a.date < dateStr);
+  return prior.length ? prior[prior.length - 1].site : null;
+}
+function setSite(dateStr, site) {
+  const a = (state.patchActions || []).find((x) => x.date === dateStr && x.action === 'apply');
+  if (!a) return;
+  a.site = site || undefined;
+  saveState(); renderAll();
+  if (!$('#dayDetail').classList.contains('hidden')) showDayDetail(dateStr);
+}
+// Small overlay asking where the patch went, with a same-spot rotation warning.
+function promptSiteFor(ds) {
+  document.querySelector('.site-modal')?.remove();
+  const prevSite = lastSiteBefore(ds);
+  const cur = siteOf(ds);
+  const m = document.createElement('div');
+  m.className = 'site-modal';
+  m.innerHTML = `<div class="site-sheet">
+    <h3>Where did this patch go?</h3>
+    <p class="muted small">Rotate sites each week to avoid skin irritation. Never on the breasts.</p>
+    <div class="site-grid">${SITES.map((s) =>
+      `<button class="btn btn-ghost${cur === s ? ' on-site' : ''}" data-site="${s}">${s}${prevSite === s ? ' ⟲' : ''}</button>`).join('')}
+    </div>
+    <div id="siteWarn" class="muted small" style="min-height:18px;margin-top:8px"></div>
+    <button class="link-btn" data-site="">Skip</button>
+  </div>`;
+  m.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-site]');
+    if (!b && e.target === m) { m.remove(); return; } // tap outside closes
+    if (!b) return;
+    const site = b.dataset.site;
+    if (site && site === prevSite && !b.dataset.confirmed) {
+      b.dataset.confirmed = '1';
+      m.querySelector('#siteWarn').innerHTML =
+        `<span style="color:var(--patch)">Same spot as your last patch — the leaflet says to use a different site. Tap again to log it anyway.</span>`;
+      return;
+    }
+    if (site) { setSite(ds, site); toast(`Placement saved: ${site.toLowerCase()}`); }
+    m.remove();
+  });
+  document.body.appendChild(m);
 }
 // Remove logged patch action(s) on a given date (to fix a mistake).
 function unlogPatchActionOn(ds, action) {
@@ -950,6 +1153,7 @@ function renderCalendar() {
     if (info.patch) marks.push('patch');
     if (info.patchfree) marks.push('patchfree');
     if (info.note && !info.period) marks.push('note');
+    if ((state.appointments || []).some((a) => a.date === ds)) marks.push('appt');
     const dots = marks.slice(0, 4).map((c) => `<span class="mark ${c}"></span>`).join('');
     const cell = document.createElement('div');
     cell.className = cls.join(' ');
@@ -986,6 +1190,17 @@ function showDayDetail(ds) {
     <div class="log-row"><label>Flow strength</label>
       <div class="seg" id="dFlow">${flowSegHTML(log.flow || '')}</div>
     </div>
+    <div class="log-row${log.flow ? '' : ' inactive'}" id="dBleedTypeRow"><label>Bleeding type</label>
+      <div class="seg" id="dBleedType">
+        <button data-val="" class="${(log.bleedType || '') === '' ? 'on' : ''}">Not sure</button>
+        <button data-val="withdrawal" class="${log.bleedType === 'withdrawal' ? 'on' : ''}">Withdrawal</button>
+        <button data-val="breakthrough" class="${log.bleedType === 'breakthrough' ? 'on' : ''}">Breakthrough</button>
+      </div>
+    </div>
+    <div class="log-row"><label>Private log</label>
+      <div class="chips" id="dTags">${INTIMACY.map(([t, l]) =>
+        `<button class="chip${(log.tags || []).includes(t) ? ' on' : ''}" data-tag="${t}" type="button">${l}</button>`).join('')}</div>
+    </div>
     <div class="log-row"><label>Notes</label>
       <textarea id="dNotes" rows="2" placeholder="Notes for this day…">${log.notes ? escapeHtml(log.notes) : ''}</textarea>
     </div>
@@ -999,17 +1214,29 @@ function showDayDetail(ds) {
         <button class="btn btn-ghost btn-ic" data-act="${appliedHere ? 'unapply' : 'apply'}" style="flex:1">${appliedHere ? '✕ Undo applied' : ic('bandage', 'var(--patch)', 'b-ic') + 'Applied patch'}</button>
         <button class="btn btn-ghost btn-ic" data-act="${removedHere ? 'unremove' : 'remove'}" style="flex:1">${removedHere ? '✕ Undo removed' : ic('moon', 'var(--patchfree)', 'b-ic') + 'Removed patch'}</button>
       </div>
+      ${appliedHere ? `<button class="link-btn" data-act="site" style="margin-top:8px">Placement: ${siteOf(ds) ? siteOf(ds).toLowerCase() : 'not set'} — change</button>` : ''}
     </div>`;
   box.querySelector('#dFlow').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     box.querySelectorAll('#dFlow button').forEach((x) => x.classList.toggle('on', x === b));
+    box.querySelector('#dBleedTypeRow').classList.toggle('inactive', !b.dataset.val);
+  });
+  box.querySelector('#dBleedType').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    box.querySelectorAll('#dBleedType button').forEach((x) => x.classList.toggle('on', x === b));
+  });
+  box.querySelector('#dTags').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    b.classList.toggle('on');
   });
   box.querySelector('[data-act="save"]').addEventListener('click', () => {
     const flow = (box.querySelector('#dFlow button.on') || {}).dataset?.val ?? '';
+    const bleedType = flow ? ((box.querySelector('#dBleedType button.on') || {}).dataset?.val ?? '') : '';
     const notes = box.querySelector('#dNotes').value.trim();
+    const tags = [...box.querySelectorAll('#dTags .chip.on')].map((c) => c.dataset.tag);
     const prev = state.logs[ds] || {};
-    if (!flow && !notes && !(prev.symptoms && prev.symptoms.length)) delete state.logs[ds];
-    else state.logs[ds] = { flow, symptoms: prev.symptoms || [], notes };
+    if (!flow && !notes && !tags.length && !(prev.symptoms && prev.symptoms.length)) delete state.logs[ds];
+    else state.logs[ds] = { flow, bleedType, symptoms: prev.symptoms || [], tags, notes };
     // logging real flow (not spotting) starts a period if none covers this day
     if (flow && flow !== 'spotting' && !state.periods.some((p) => ds >= p.start && ds <= (p.end || p.start))) {
       if (!state.periods.some((p) => p.start === ds)) state.periods.push({ start: ds, end: null });
@@ -1028,6 +1255,7 @@ function showDayDetail(ds) {
     if (act === 'remove') logPatchActionOn(ds, 'remove'); else unlogPatchActionOn(ds, 'remove');
     showDayDetail(ds);
   });
+  box.querySelector('[data-act="site"]')?.addEventListener('click', () => promptSiteFor(ds));
 }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -1048,6 +1276,7 @@ function renderPatch() {
   $('#patchStart').value = state.settings.patchStart || '';
   $('#reminderTime').value = state.settings.reminderTime || '09:00';
   $('#patchesLeft').value = state.settings.patchesLeft ?? '';
+  $('#patchExpiry').value = state.settings.patchExpiry || '';
   const box = $('#patchSchedule'); box.innerHTML = '';
   // be upfront when the schedule has re-anchored to logged reality
   const anchor = cycleAnchor();
@@ -1077,9 +1306,60 @@ $('#savePatch').addEventListener('click', () => {
   state.settings.reminderTime = $('#reminderTime').value || '09:00';
   const pl = $('#patchesLeft').value.trim();
   state.settings.patchesLeft = pl === '' ? null : clampNum(pl, 0, 60, null);
+  state.settings.patchExpiry = $('#patchExpiry').value || null;
   if (v) state.settings.onPatch = true;
   saveState(); hydrateSettings(); renderAll(); scheduleReminderTimer();
   toast('Patch schedule saved');
+});
+
+/* ---- Appointments & refills ---- */
+function renderAppointments() {
+  const box = $('#appointmentsList'); if (!box) return;
+  const tISO = todayISO();
+  const list = (state.appointments || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+  if (!list.length) { box.innerHTML = '<p class="muted small">No appointments or refills scheduled.</p>'; return; }
+  box.innerHTML = list.map((a) => {
+    const dleft = daysBetween(tISO, a.date);
+    const when = dleft === 0 ? 'Today' : dleft === 1 ? 'Tomorrow' : dleft > 1 ? `in ${dleft} days` : fmtDate(a.date);
+    return `<div class="h-item"><span>${a.type === 'refill' ? ic('backup', 'var(--fertile)', 'h-ic') : ic('calendar', 'var(--patchfree)', 'h-ic')} ${escapeHtml(a.label)}</span>
+      <span class="${dleft <= 2 && dleft >= 0 ? '' : 'muted'}" style="display:flex;align-items:center;gap:8px">${when}
+      <button class="link-btn" data-del="${a.id}" style="margin:0;font-size:12px">✕</button></span></div>`;
+  }).join('');
+  box.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
+    state.appointments = state.appointments.filter((a) => a.id !== b.dataset.del);
+    saveState(); renderAppointments(); renderCalendar();
+  }));
+}
+$('#addAppointment')?.addEventListener('click', () => {
+  const date = prompt('Date (YYYY-MM-DD):', todayISO());
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { if (date !== null) toast('Use YYYY-MM-DD'); return; }
+  const label = (prompt('What is it? (e.g. "Dr. Lee follow-up" or "Pharmacy refill")') || '').trim();
+  if (!label) return;
+  const type = /refill|pharmacy|prescription/i.test(label) ? 'refill' : 'appointment';
+  state.appointments = state.appointments || [];
+  state.appointments.push({ id: crypto.randomUUID(), date, label: label.slice(0, 60), type });
+  saveState(); renderAppointments(); renderCalendar();
+  toast('Added');
+});
+
+/* ---- Doctor-visit questions ---- */
+function renderDoctorQuestions() {
+  const box = $('#doctorQuestions'); if (!box) return;
+  const list = state.settings.doctorQuestions || [];
+  if (!list.length) { box.innerHTML = '<p class="muted small">No questions saved yet.</p>'; return; }
+  box.innerHTML = list.map((q, i) =>
+    `<div class="h-item"><span>${escapeHtml(q)}</span><button class="link-btn" data-qi="${i}" style="margin:0;font-size:12px">✕</button></div>`).join('');
+  box.querySelectorAll('[data-qi]').forEach((b) => b.addEventListener('click', () => {
+    state.settings.doctorQuestions.splice(Number(b.dataset.qi), 1);
+    saveState(); renderDoctorQuestions();
+  }));
+}
+$('#addDoctorQuestion')?.addEventListener('click', () => {
+  const q = (prompt('Question to bring up at your next appointment:') || '').trim();
+  if (!q) return;
+  state.settings.doctorQuestions = state.settings.doctorQuestions || [];
+  state.settings.doctorQuestions.push(q.slice(0, 140));
+  saveState(); renderDoctorQuestions();
 });
 $('#exportIcs').addEventListener('click', exportICS);
 
@@ -1167,20 +1447,48 @@ function renderInsights() {
       `<p class="muted small" style="margin:8px 0 0">Pink = bleeding days. Bars line up at day 1${state.settings.onPatch ? ' — on the patch these are withdrawal bleeds' : ''}.</p>`;
   }
 
-  // symptom patterns from calendar logs
+  // symptom patterns from calendar logs — natural-language insight cards first,
+  // then the raw per-symptom counts
   const st = $('#symptomTrends');
   const trends = symptomTrends();
   if (!trends || !trends.length) {
     st.innerHTML = '<p class="muted small">Log symptoms on the Today screen and patterns will show up here — like whether cramps cluster in your patch-free week.</p>';
   } else {
-    const rows = trends.slice(0, 6).map((t) =>
+    const clustered = trends.filter((t) => t.clusters);
+    const cards = clustered.slice(0, 4).map((t) => {
+      const verb = t.dominant === 'free' ? 'usually occur during' : (t.share >= 0.7 ? 'peak during' : 'tend to happen most in');
+      return `<div class="insight-line">${ic(t.dominant === 'free' ? 'moon' : 'sparkle', t.dominant === 'free' ? 'var(--patchfree)' : 'var(--patch)', 'i-ic')} <b>${t.sym}</b> ${verb} <b>${t.dominantLabel}</b> (${t[t.dominant]} of ${t.total} logs).</div>`;
+    }).join('');
+    const bt = bleedTimingInsight();
+    const btCard = bt ? `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} You typically start bleeding <b>${bt.avg} day${bt.avg === 1 ? '' : 's'}</b> after removing a patch (based on ${bt.n} cycles).</div>` : '';
+    const rows = trends.slice(0, 8).map((t) =>
       `<div class="h-item"><span>${t.sym}</span><span class="${t.clusters ? '' : 'muted'}">${t.clusters
-        ? `${ic('moon', 'var(--patchfree)', 'h-ic')} mostly patch-free week (${t.free} of ${t.total})`
+        ? `${ic('moon', 'var(--patchfree)', 'h-ic')} ${t.dominantLabel} (${t[t.dominant]} of ${t.total})`
         : `${t.total}×`}</span></div>`).join('');
-    const anyCluster = trends.some((t) => t.clusters);
-    st.innerHTML = `<div class="history">${rows}</div>` + (anyCluster
-      ? `<p class="muted small" style="margin-top:8px">Symptoms clustering in the patch-free week are typical hormone-withdrawal effects. If they're rough, ask your clinician about options — some people shorten the patch-free interval under medical guidance.</p>`
+    st.innerHTML = cards + btCard + `<div class="history" style="margin-top:${cards || btCard ? '10px' : '0'}">${rows}</div>` + (clustered.length
+      ? `<p class="muted small" style="margin-top:8px">Patterns tied to the patch-free week are typical hormone-withdrawal effects. If they're rough, ask your clinician about options — some people shorten the patch-free interval under medical guidance.</p>`
       : '');
+  }
+
+  // pregnancy risk windows — factual, date-based, never a fabricated probability
+  const rw = $('#riskWindows');
+  if (!state.settings.onPatch) {
+    rw.innerHTML = '<p class="muted small">This only applies while tracking the patch — turn on "Currently using the patch" in Settings if that changes.</p>';
+  } else {
+    const rc = riskCrossref();
+    if (!rc.windows.length) {
+      rw.innerHTML = `<div class="insight-line">${ic('check', 'var(--ok)', 'i-ic')} No reduced-protection windows from your logged patch changes. Nice and steady.</div>`;
+    } else if (rc.hits.length) {
+      rw.innerHTML = `<div class="insight-line" style="border-left:3px solid var(--accent)">${ic('warn', 'var(--accent)', 'i-ic')}
+        <b>Unprotected sex was logged during a reduced-protection window.</b> If this was recent, emergency contraception
+        is most effective the sooner it's taken (within 3–5 days) — consider talking to a pharmacist or clinician promptly.
+        A missed period is also worth a pregnancy test.</div>` +
+        rc.windows.map((w) => `<div class="insight-line small ${rc.hits.some((h) => h >= w.from && h <= w.to) ? '' : 'muted'}">${fmtDate(w.from)} – ${fmtDate(w.to)}${rc.hits.some((h) => h >= w.from && h <= w.to) ? ' — flagged above' : ' — no unprotected sex logged'}</div>`).join('') +
+        `<p class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</p>`;
+    } else {
+      rw.innerHTML = `<div class="insight-line">${ic('clock', 'var(--patch)', 'i-ic')} You had ${rc.windows.length} reduced-protection window${rc.windows.length === 1 ? '' : 's'} from late/extended patch timing, but no unprotected sex was logged during ${rc.windows.length === 1 ? 'it' : 'them'}.</div>` +
+        rc.windows.map((w) => `<div class="insight-line small muted">${fmtDate(w.from)} – ${fmtDate(w.to)}</div>`).join('');
+    }
   }
 
   // adherence — the honest scoreboard of everything logged in the calendar
@@ -1316,12 +1624,19 @@ function buildDoctorReport() {
   const trends = symptomTrends() || [];
   const psDesc = sortedPeriods().slice().reverse().slice(0, 12);
   const hist = patchHistory().slice(0, 14);
+  const rf = refillStatus();
+  const rc = riskCrossref();
   const row = (a, b) => `<tr><td>${a}</td><td>${b}</td></tr>`;
+  const bleedRows = Object.entries(state.logs).filter(([, l]) => l.bleedType)
+    .reduce((acc, [, l]) => { acc[l.bleedType] = (acc[l.bleedType] || 0) + 1; return acc; }, {});
+  const siteRows = sortedActions().filter((a) => a.action === 'apply' && a.site).slice(-8).reverse();
+  const appts = (state.appointments || []).slice().sort((a, b) => a.date.localeCompare(b.date));
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Petal — cycle report</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222;line-height:1.5}
 h1{font-size:22px}h2{font-size:16px;margin-top:26px;border-bottom:1px solid #ddd;padding-bottom:4px}
 table{border-collapse:collapse;width:100%;font-size:14px}td{padding:5px 8px;border-bottom:1px solid #eee}
-.meta{color:#666;font-size:13px}.warn{color:#a33}</style></head><body>
+.meta{color:#666;font-size:13px}.warn{color:#a33}
+@media print{.no-print{display:none}}</style></head><body>
 <h1>Cycle &amp; contraception report</h1>
 <p class="meta">Generated ${new Date().toLocaleDateString()} from Petal (self-tracked data — accuracy depends on what was logged).</p>
 <h2>Summary</h2><table>
@@ -1331,16 +1646,33 @@ ${row('Average bleed length', s.avgPeriod ? `${s.avgPeriod} days` : 'not enough 
 ${row('Regularity', variability(s.lengths))}
 ${adh ? row('Patch changes logged', `${adh.rated} rated — ${adh.ontime} on time, ${adh.early} early, ${adh.late} late; ${adh.risks} with possible reduced protection`) : ''}
 ${adh && adh.maxHF != null ? row('Longest hormone-free interval', `${adh.maxHF} days ${adh.maxHF > 7 ? '(exceeded the 7-day limit)' : '(within the 7-day limit)'}`) : ''}
+${rf ? row('Patches on hand', `${rf.left}${rf.outDate ? ` — projected to run out ${fmtDate(rf.outDate)}` : ''}`) : ''}
+${state.settings.patchExpiry ? row('Prescription/box expiration', fmtDate(state.settings.patchExpiry, { year: 'numeric', month: 'short', day: 'numeric' })) : ''}
 </table>
 <h2>Recent bleeds</h2><table>
 ${psDesc.map((p) => row(fmtDate(p.start, { year: 'numeric', month: 'short', day: 'numeric' }),
   p.end ? `${daysBetween(p.start, p.end) + 1} days (to ${fmtDate(p.end, { month: 'short', day: 'numeric' })})` : 'ongoing / end not logged')).join('') || row('—', 'none logged')}
 </table>
+${Object.keys(bleedRows).length ? `<h2>Bleeding type (self-reported)</h2><table>
+${Object.entries(bleedRows).map(([k, v]) => row(k === 'withdrawal' ? 'Withdrawal bleed' : k === 'breakthrough' ? 'Breakthrough bleeding' : 'Unspecified', `${v}×`)).join('')}
+</table>` : ''}
 ${hist.length ? `<h2>Recent patch events</h2><table>
 ${hist.map((e) => row(`${fmtDate(e.date, { year: 'numeric', month: 'short', day: 'numeric' })} — ${e.action}`, e.note)).join('')}
 </table>` : ''}
+${siteRows.length ? `<h2>Patch placement (rotation)</h2><table>
+${siteRows.map((a) => row(fmtDate(a.date, { year: 'numeric', month: 'short', day: 'numeric' }), a.site)).join('')}
+</table>` : ''}
 ${trends.length ? `<h2>Symptoms</h2><table>
-${trends.slice(0, 8).map((t) => row(t.sym, `${t.total}× logged${t.clusters ? ` — ${t.free} of ${t.total} during the patch-free week` : ''}`)).join('')}
+${trends.slice(0, 10).map((t) => row(t.sym, `${t.total}× logged${t.clusters ? ` — mostly ${t.dominantLabel} (${t[t.dominant]} of ${t.total})` : ''}`)).join('')}
+</table>` : ''}
+${rc && rc.windows.length ? `<h2>Reduced-protection windows (from logged patch timing)</h2><table>
+${rc.windows.map((w) => row(`${fmtDate(w.from, { month: 'short', day: 'numeric' })} – ${fmtDate(w.to, { month: 'short', day: 'numeric' })}`, rc.hits.some((h) => h >= w.from && h <= w.to) ? 'Unprotected sex logged in this window' : 'No unprotected sex logged')).join('')}
+</table>` : ''}
+${appts.length ? `<h2>Appointments &amp; refills</h2><table>
+${appts.map((a) => row(fmtDate(a.date, { year: 'numeric', month: 'short', day: 'numeric' }), a.label)).join('')}
+</table>` : ''}
+${(state.settings.doctorQuestions || []).length ? `<h2>Questions to discuss</h2><table>
+${state.settings.doctorQuestions.map((q) => row('•', q)).join('')}
 </table>` : ''}
 <p class="meta warn">This file is not encrypted. Share it only with people you trust, and delete copies you no longer need.</p>
 </body></html>`;
@@ -1349,6 +1681,14 @@ $('#exportReport').addEventListener('click', () => {
   if (!confirm('This creates a READABLE (unencrypted) summary for a clinician. Only share it with people you trust. Continue?')) return;
   downloadBlob(new Blob([buildDoctorReport()], { type: 'text/html' }), `petal-report-${todayISO()}.html`);
   toast('Report exported — open or AirDrop it');
+});
+$('#printReport').addEventListener('click', () => {
+  if (!confirm('This opens a READABLE (unencrypted) summary for printing/saving as PDF. Continue?')) return;
+  const win = window.open('', '_blank');
+  if (!win) { toast('Allow pop-ups to preview the report'); return; }
+  win.document.write(buildDoctorReport());
+  win.document.close();
+  setTimeout(() => { try { win.print(); } catch {} }, 300);
 });
 
 $('#eraseData').addEventListener('click', () => {
