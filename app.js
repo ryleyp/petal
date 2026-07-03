@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v16'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v17'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -267,19 +267,44 @@ document.addEventListener('visibilitychange', () => {
 $('#lockNow').addEventListener('click', () => location.reload());
 
 /* ============================================================ Periods ===== */
-/* Periods are DERIVED from the bleeding you log day-by-day: an episode starts on
- * the first bleeding day after a gap and ends on the last bleeding day before a
- * gap (any bleed-free calendar day ends it). Episodes that are only spotting, or
- * marked breakthrough on every day, don't count as periods — they're breakthrough
- * bleeding. Manually logged periods (the Started/Ended buttons) still work as a
- * fallback layer for ranges with no daily flow logs. */
+/* Periods are DERIVED from the bleeding you log day-by-day. One pipeline:
+ *   - a bleeding day = any day with flow logged (a "Period started" marker also
+ *     counts as a bleeding day, and legacy start–end ranges count day-by-day);
+ *   - consecutive bleeding days form one episode, across month boundaries
+ *     (May 25 → Jun 8 is ONE period) — any bleed-free calendar day ends it;
+ *   - an episode is a period if it has real (non-spotting) flow, OR you
+ *     explicitly marked "Period started" in it (so a spotting-day start counts);
+ *     spotting-only or all-breakthrough episodes without a marker are
+ *     breakthrough bleeding, not periods.
+ * There is no "period ended" anywhere — the end is always implied by the gap. */
 let _periodsCache = null;
 function invalidatePeriods() { _periodsCache = null; }
 
+function bleedDayMap() {
+  const map = new Map(); // date -> { flow, bt, marker }
+  for (const [d, l] of Object.entries(state.logs)) {
+    if (l.flow) map.set(d, { flow: l.flow, bt: l.bleedType || '', marker: false });
+  }
+  // manual entries: start markers; legacy {start,end} ranges count as bleeding days
+  for (const m of (state.periods || [])) {
+    if (!m.start) continue;
+    const end = m.end && m.end >= m.start ? m.end : m.start;
+    let d = parseISO(m.start), guard = 0;
+    const e = parseISO(end);
+    while (d <= e && guard++ < 60) {
+      const ds = iso(d);
+      const cur = map.get(ds) || { flow: '', bt: '', marker: false };
+      if (ds === m.start) cur.marker = true;
+      map.set(ds, cur);
+      d = addDays(d, 1);
+    }
+  }
+  return map;
+}
+
 function bleedEpisodes() {
-  const days = Object.entries(state.logs)
-    .filter(([, l]) => l.flow)
-    .map(([d, l]) => ({ d, flow: l.flow, bt: l.bleedType || '' }))
+  const days = [...bleedDayMap().entries()]
+    .map(([d, v]) => ({ d, ...v }))
     .sort((a, b) => a.d.localeCompare(b.d));
   const eps = [];
   for (const day of days) {
@@ -295,42 +320,30 @@ function bleedEpisodes() {
 
 function derivedPeriods() {
   return bleedEpisodes()
-    .filter((e) => e.days.some((x) => x.flow !== 'spotting') && e.days.some((x) => x.bt !== 'breakthrough'))
+    .filter((e) => e.days.some((x) => x.marker) ||
+      (e.days.some((x) => x.flow && x.flow !== 'spotting') && e.days.some((x) => x.flow && x.bt !== 'breakthrough')))
     .map((e) => ({ start: e.start, end: e.end, ongoing: e.end === todayISO(), derived: true }));
 }
 
 function sortedPeriods() {
-  if (_periodsCache) return _periodsCache;
-  const derived = derivedPeriods();
-  // manual periods only fill gaps the daily logs don't cover
-  const manual = (state.periods || []).filter((m) => {
-    const mEnd = m.end || todayISO();
-    return !derived.some((d) => m.start <= d.end && mEnd >= d.start);
-  });
-  _periodsCache = derived.concat(manual).sort((a, b) => a.start.localeCompare(b.start));
+  if (!_periodsCache) _periodsCache = derivedPeriods();
   return _periodsCache;
 }
-function openPeriod() {
-  // manual layer only — the Started/Ended buttons operate on stored entries
-  const ps = [...(state.periods || [])].sort((a, b) => a.start.localeCompare(b.start));
-  const last = ps[ps.length - 1];
-  return last && !last.end ? last : null;
+
+function hasStartMarker(dateStr) {
+  return (state.periods || []).some((p) => p.start === dateStr);
 }
 function startPeriod(dateStr) {
   dateStr = dateStr || todayISO();
-  // avoid duplicate same-day start
-  if (state.periods.some((p) => p.start === dateStr)) { toast('Already logged'); return; }
-  const op = openPeriod();
-  if (op && daysBetween(op.start, dateStr) <= 10) { toast('Period already in progress'); return; }
-  state.periods.push({ start: dateStr, end: null });
-  saveState(); renderAll(); toast('Period start logged 🩸');
+  if (hasStartMarker(dateStr)) { toast('Already marked'); return; }
+  state.periods.push({ start: dateStr });
+  saveState(); renderAll();
+  toast('Period start marked — the end is implied when your bleeding logs stop');
 }
-function endPeriod(dateStr) {
-  dateStr = dateStr || todayISO();
-  const op = openPeriod();
-  if (!op) { toast('No open period to end'); return; }
-  op.end = dateStr;
-  saveState(); renderAll(); toast('Period end logged ✅');
+function unmarkStart(dateStr) {
+  // only removes simple markers; legacy start–end ranges are left alone
+  state.periods = (state.periods || []).filter((p) => !(p.start === dateStr && (!p.end || p.end === p.start)));
+  saveState(); renderAll(); toast('Start mark removed');
 }
 
 /* cycle stats from logged period starts */
@@ -341,7 +354,8 @@ function cycleStats() {
     const len = daysBetween(ps[i - 1].start, ps[i].start);
     if (len >= 18 && len <= 60) lengths.push(len);
   }
-  const periodLens = ps.filter((p) => p.end).map((p) => daysBetween(p.start, p.end) + 1).filter((n) => n >= 1 && n <= 14);
+  // exclude the still-ongoing episode; allow long bleeds (e.g. a 15-day May 25 → Jun 8 period)
+  const periodLens = ps.filter((p) => p.end && !p.ongoing).map((p) => daysBetween(p.start, p.end) + 1).filter((n) => n >= 1 && n <= 20);
   const avg = (arr, fb) => (arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length) : fb);
   return {
     count: ps.length,
@@ -1068,7 +1082,6 @@ $('.quick-actions').addEventListener('click', (e) => {
   const b = e.target.closest('.qa'); if (!b) return;
   const q = b.dataset.quick;
   if (q === 'period-start') startPeriod();
-  if (q === 'period-end') endPeriod();
   if (q === 'patch-applied') applyPatchToday();
   if (q === 'patch-removed') removePatchToday();
 });
@@ -1244,9 +1257,12 @@ function showDayDetail(ds) {
     </div>
     <button class="btn btn-primary full" data-act="save">Save this day</button>
     <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
-      <button class="btn btn-ghost btn-ic" data-act="ps" style="flex:1">${ic('drop', 'var(--period)', 'b-ic')}Period started</button>
-      <button class="btn btn-ghost btn-ic" data-act="pe" style="flex:1">${ic('check', 'var(--ok)', 'b-ic')}Period ended</button>
+      <button class="btn btn-ghost btn-ic" data-act="ps" style="flex:1">${hasStartMarker(ds)
+        ? '✕ Unmark period start'
+        : ic('drop', 'var(--period)', 'b-ic') + 'Period started this day'}</button>
     </div>
+    <p class="muted small" style="margin:8px 0 0">A period's end is implied automatically — it's the
+      last bleeding day you log before a gap. Use the mark above if day 1 was only spotting.</p>
     <div class="log-row" style="margin-top:8px"><label>Patch (log for this day)</label>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-ghost btn-ic" data-act="${appliedHere ? 'unapply' : 'apply'}" style="flex:1">${appliedHere ? '✕ Undo applied' : ic('bandage', 'var(--patch)', 'b-ic') + 'Applied patch'}</button>
@@ -1278,8 +1294,10 @@ function showDayDetail(ds) {
     // periods are derived from consecutive bleeding days — no manual entry needed
     saveState(); renderAll(); showDayDetail(ds); toast('Day saved');
   });
-  box.querySelector('[data-act="ps"]').addEventListener('click', () => { startPeriod(ds); showDayDetail(ds); });
-  box.querySelector('[data-act="pe"]').addEventListener('click', () => { endPeriod(ds); showDayDetail(ds); });
+  box.querySelector('[data-act="ps"]').addEventListener('click', () => {
+    if (hasStartMarker(ds)) unmarkStart(ds); else startPeriod(ds);
+    showDayDetail(ds);
+  });
   box.querySelector('[data-act^="apply"],[data-act^="unapply"]').addEventListener('click', (e) => {
     const act = e.currentTarget.dataset.act;
     if (act === 'apply') logPatchActionOn(ds, 'apply'); else unlogPatchActionOn(ds, 'apply');
@@ -1583,12 +1601,11 @@ function renderInsights() {
   const h = $('#history'); h.innerHTML = '';
   const ps = sortedPeriods().slice().reverse();
   if (!ps.length) { h.innerHTML = '<p class="muted small">No periods logged yet.</p>'; }
-  ps.slice(0, 12).forEach((p, i) => {
-    const next = ps[i - 1]; // since reversed, previous in array is later in time
-    const len = p.end ? daysBetween(p.start, p.end) + 1 : null;
+  ps.slice(0, 12).forEach((p) => {
+    const len = daysBetween(p.start, p.end || p.start) + 1;
     h.insertAdjacentHTML('beforeend',
-      `<div class="h-item"><span>${fmtDate(p.start)}${p.end ? ' – ' + fmtDate(p.end) : ' (ongoing)'}</span>
-       <span class="muted">${len ? len + 'd' : ''}</span></div>`);
+      `<div class="h-item"><span>${fmtDate(p.start)}${p.ongoing ? ' (ongoing)' : ' – ' + fmtDate(p.end)}</span>
+       <span class="muted">${len}d${p.ongoing ? '…' : ''}</span></div>`);
   });
 }
 function variability(lengths) {
@@ -1693,7 +1710,7 @@ ${state.settings.patchExpiry ? row('Prescription/box expiration', fmtDate(state.
 </table>
 <h2>Recent bleeds</h2><table>
 ${psDesc.map((p) => row(fmtDate(p.start, { year: 'numeric', month: 'short', day: 'numeric' }),
-  p.end ? `${daysBetween(p.start, p.end) + 1} days (to ${fmtDate(p.end, { month: 'short', day: 'numeric' })})` : 'ongoing / end not logged')).join('') || row('—', 'none logged')}
+  p.ongoing ? `ongoing (${daysBetween(p.start, p.end) + 1} days so far)` : `${daysBetween(p.start, p.end || p.start) + 1} days (to ${fmtDate(p.end || p.start, { month: 'short', day: 'numeric' })})`)).join('') || row('—', 'none logged')}
 </table>
 ${Object.keys(bleedRows).length ? `<h2>Bleeding type (self-reported)</h2><table>
 ${Object.entries(bleedRows).map(([k, v]) => row(k === 'withdrawal' ? 'Withdrawal bleed' : k === 'breakthrough' ? 'Breakthrough bleeding' : 'Unspecified', `${v}×`)).join('')}

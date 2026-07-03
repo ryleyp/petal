@@ -205,6 +205,7 @@ main#views {
   display: flex; align-items: center; justify-content: center; gap: 8px;
 }
 .qa-ic { width: 22px; height: 22px; flex: 0 0 auto; }
+.qa-wide { grid-column: 1 / -1; }
 .qa:active { transform: scale(0.97); }
 
 /* ---------- Log rows ---------- */
