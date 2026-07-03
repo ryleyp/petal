@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v18'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v19'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -416,7 +416,10 @@ function cycleAnchors() {
   for (const a of sortedActions()) {
     if (a.action === 'apply') {
       if (!anchors.length) anchors.push(a.date);
-      else if (prev && (prev.action === 'remove' || prev.action === 'detached')) anchors.push(a.date);
+      else if (prev && prev.action === 'remove') anchors.push(a.date);
+      // a fallen-off patch re-applied within 24h keeps the original change day;
+      // off ≥24h means a fresh 4-week cycle starts here
+      else if (prev && prev.action === 'detached' && daysBetween(prev.date, a.date) >= 2) anchors.push(a.date);
       else if (prev && prev.action === 'apply' && daysBetween(prev.date, a.date) >= 9) anchors.push(a.date);
     }
     prev = a;
@@ -584,7 +587,13 @@ function assessPatch() {
     return Object.assign(lateGuidance('change-late', (daysOn - 7) * 24), { daysOn, num });
   }
 
-  // No patch on -> patch-free interval. How long has it been hormone-free?
+  // No patch on. A fall-off is urgent; a removal starts the normal patch-free week.
+  if (lastRemove && lastRemove.action === 'detached') {
+    const daysOff = daysBetween(lastRemove.date, tISO);
+    if (daysOff <= 1) return { level: 'caution', title: 'Patch fell off — act now',
+      message: 'Re-apply it if it still sticks well, or put on a new patch. Within 24 hours you stay protected and keep your usual change day.' };
+    return Object.assign(lateGuidance('detached', daysOff * 24), { daysOff });
+  }
   if (lastRemove) {
     const daysFree = daysBetween(lastRemove.date, tISO);
     if (daysFree < 7) return { level: 'ok', title: 'Patch-free week', message: `Apply your next patch in ${7 - daysFree} day${7 - daysFree === 1 ? '' : 's'}.` };
@@ -621,7 +630,12 @@ function patchHistory() {
         if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed ${-delta}d early`; }
         else if (gap < 9) { status = 'caution'; note = `Changed ${delta}d late (<48h) — still protected`; }
         else { status = 'risk'; note = `Changed ${delta}d late (≥48h) — protection reduced, new cycle from here`; }
-      } else { // apply after a remove/detach = start of a new cycle
+      } else if (prev.action === 'detached') { // re-apply after a fall-off
+        const gap = daysBetween(prev.date, a.date);
+        kind = 'incident'; delta = null;
+        if (gap <= 1) { status = 'ok'; note = 'Re-applied within 24h — still protected'; }
+        else { status = 'risk'; note = `Off ~${gap}d before a new patch — new cycle from here, 7-day backup advised`; hfGap = gap; }
+      } else { // apply after a remove = start of a new cycle
         const gap = daysBetween(prev.date, a.date);
         hfGap = gap; delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
         if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'New patch on time' : `New patch ${-delta}d early`; }
@@ -647,8 +661,11 @@ function riskWindows() {
       const gap = daysBetween(prev.date, a.date);
       if (prev.action === 'apply' && gap >= 9) {
         ws.push({ from: iso(addDays(parseISO(prev.date), 9)), to: iso(addDays(parseISO(a.date), 7)) });
-      } else if ((prev.action === 'remove' || prev.action === 'detached') && gap > 7) {
+      } else if (prev.action === 'remove' && gap > 7) {
         ws.push({ from: iso(addDays(parseISO(prev.date), 8)), to: iso(addDays(parseISO(a.date), 7)) });
+      } else if (prev.action === 'detached' && gap >= 2) {
+        // off ≥24h: protection reduced from the day after it fell until 7 days on the new patch
+        ws.push({ from: iso(addDays(parseISO(prev.date), 1)), to: iso(addDays(parseISO(a.date), 7)) });
       }
     }
     prev = a;
@@ -658,8 +675,10 @@ function riskWindows() {
     const t = todayISO();
     if (prev.action === 'apply' && daysBetween(prev.date, t) >= 9) {
       ws.push({ from: iso(addDays(parseISO(prev.date), 9)), to: iso(addDays(today(), 7)) });
-    } else if ((prev.action === 'remove' || prev.action === 'detached') && daysBetween(prev.date, t) > 7) {
+    } else if (prev.action === 'remove' && daysBetween(prev.date, t) > 7) {
       ws.push({ from: iso(addDays(parseISO(prev.date), 8)), to: iso(addDays(today(), 7)) });
+    } else if (prev.action === 'detached' && daysBetween(prev.date, t) >= 2) {
+      ws.push({ from: iso(addDays(parseISO(prev.date), 1)), to: iso(addDays(today(), 7)) });
     }
   }
   return ws;
@@ -825,6 +844,53 @@ function bleedingHealth() {
     if (cyclesWithBt >= 3) lines.push(`You've had breakthrough bleeding/spotting during the patch weeks in <b>${cyclesWithBt} recent cycles</b>. Common in early patch use, but if it persists it's worth a clinician chat — sometimes it also follows late changes.`);
   }
   return lines;
+}
+
+/* When to expect the next withdrawal bleed: next scheduled removal + your own
+ * typical removal→bleed delay (default 2 days until enough cycles are logged). */
+function nextBleedPrediction() {
+  if (!state.settings.onPatch || !cycleAnchor()) return null;
+  const cd = patchCycleDay(todayISO());
+  if (cd === null) return null;
+  const bt = bleedTimingInsight();
+  const offset = bt ? bt.avg : 2;
+  // most recent removal point (this cycle's day 21, past or upcoming)
+  const removal = cd >= 21 ? addDays(today(), -(cd - 21)) : addDays(today(), 21 - cd);
+  const expected = addDays(removal, offset);
+  // if we're in the window and the bleed already started, nothing to predict
+  if (cd >= 21 && bleedDayNumber() > 0) return null;
+  return { expected: iso(expected), removal: iso(removal), offset, personalized: !!bt,
+    overdue: cd >= 21 && iso(expected) < todayISO() };
+}
+
+/* Are bleeds getting shorter or longer over time? Compares older vs recent halves. */
+function bleedLengthTrend() {
+  const lens = sortedPeriods().filter((p) => !p.ongoing)
+    .map((p) => daysBetween(p.start, p.end || p.start) + 1)
+    .filter((n) => n >= 1 && n <= 20);
+  if (lens.length < 4) return null;
+  const half = Math.floor(lens.length / 2);
+  const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const early = avg(lens.slice(0, half)), late = avg(lens.slice(-half));
+  const diff = late - early;
+  if (Math.abs(diff) < 1.5) return { dir: 'steady', early, late, n: lens.length };
+  return { dir: diff < 0 ? 'shorter' : 'longer', early: Math.round(early * 10) / 10, late: Math.round(late * 10) / 10, n: lens.length };
+}
+
+/* Which placements do fall-offs happen from? (site comes from the apply before) */
+function detachmentPatterns() {
+  const acts = sortedActions();
+  const det = acts.filter((a) => a.action === 'detached');
+  if (det.length < 2) return null;
+  const bySite = {};
+  let sited = 0;
+  for (const d of det) {
+    const apply = [...acts].reverse().find((a) => a.action === 'apply' && a.date <= d.date && a.site);
+    if (apply) { bySite[apply.site] = (bySite[apply.site] || 0) + 1; sited++; }
+  }
+  if (!sited) return { total: det.length, top: null };
+  const [topSite, topCount] = Object.entries(bySite).sort((a, b) => b[1] - a[1])[0];
+  return { total: det.length, sited, topSite, topCount };
 }
 
 /* Adherence stats across everything logged in the calendar. */
@@ -1261,6 +1327,7 @@ $('.quick-actions').addEventListener('click', (e) => {
   if (q === 'period-start') startPeriod();
   if (q === 'patch-applied') applyPatchToday();
   if (q === 'patch-removed') removePatchToday();
+  if (q === 'patch-detached') logPatchActionOn(todayISO(), 'detached');
 });
 
 function applyPatchToday() { logPatchActionOn(todayISO(), 'apply'); }
@@ -1282,7 +1349,8 @@ function logPatchActionOn(ds, action) {
   }
   saveState(); hydrateSettings(); renderAll();
   const a = assessPatch();
-  const msg = (a && a.level !== 'ok') ? a.title : (action === 'apply' ? 'Patch applied' : 'Patch removed');
+  const fallback = action === 'apply' ? 'Patch applied' : (action === 'detached' ? 'Fall-off logged — reapply or replace ASAP' : 'Patch removed');
+  const msg = (a && a.level !== 'ok') ? a.title : fallback;
   if (isNew) {
     toastUndo(msg, () => {
       document.querySelector('.site-modal')?.remove();
@@ -1442,9 +1510,11 @@ function showDayDetail(ds) {
   if (info.patchfree) tags.push(tag('patchfree', 'Patch-free'));
   const acts = patchActionsOn(ds);
   const appliedHere = acts.some((a) => a.action === 'apply');
-  const removedHere = acts.some((a) => a.action === 'remove' || a.action === 'detached');
+  const removedHere = acts.some((a) => a.action === 'remove');
+  const detachedHere = acts.some((a) => a.action === 'detached');
   if (appliedHere) tags.push(tag('act-apply', 'Applied (logged)'));
   if (removedHere) tags.push(tag('act-remove', 'Removed (logged)'));
+  if (detachedHere) tags.push(tag('act-remove', 'Fell off (logged)'));
   const box = $('#dayDetail'); box.classList.remove('hidden');
   box.innerHTML = `
     <div class="card-head"><h2>${fmtDate(ds, { weekday: 'long', month: 'long', day: 'numeric' })}</h2></div>
@@ -1478,6 +1548,7 @@ function showDayDetail(ds) {
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-ghost btn-ic" data-act="${appliedHere ? 'unapply' : 'apply'}" style="flex:1">${appliedHere ? '✕ Undo applied' : ic('bandage', 'var(--patch)', 'b-ic') + 'Applied patch'}</button>
         <button class="btn btn-ghost btn-ic" data-act="${removedHere ? 'unremove' : 'remove'}" style="flex:1">${removedHere ? '✕ Undo removed' : ic('moon', 'var(--patchfree)', 'b-ic') + 'Removed patch'}</button>
+        <button class="btn btn-ghost btn-ic" data-act="${detachedHere ? 'undetach' : 'detach'}" style="flex:1">${detachedHere ? '✕ Undo fell off' : ic('warn', 'var(--muted)', 'b-ic') + 'Fell off'}</button>
       </div>
       ${appliedHere ? `<button class="link-btn" data-act="site" style="margin-top:8px">Placement: ${siteOf(ds) ? siteOf(ds).toLowerCase() : 'not set'} — change</button>` : ''}
     </div>`;
@@ -1517,6 +1588,11 @@ function showDayDetail(ds) {
   box.querySelector('[data-act^="remove"],[data-act^="unremove"]').addEventListener('click', (e) => {
     const act = e.currentTarget.dataset.act;
     if (act === 'remove') logPatchActionOn(ds, 'remove'); else unlogPatchActionOn(ds, 'remove');
+    showDayDetail(ds);
+  });
+  box.querySelector('[data-act^="detach"],[data-act^="undetach"]').addEventListener('click', (e) => {
+    const act = e.currentTarget.dataset.act;
+    if (act === 'detach') logPatchActionOn(ds, 'detached'); else unlogPatchActionOn(ds, 'detached');
     showDayDetail(ds);
   });
   box.querySelector('[data-act="site"]')?.addEventListener('click', () => promptSiteFor(ds));
@@ -1666,6 +1742,11 @@ function renderInsights() {
         <div class="stat"><div class="big" style="font-size:19px;line-height:1.2;padding-top:6px">${phase.label}</div><div class="lbl">current phase</div></div>
       </div>
       <div class="insight-line">${ic(phase.mode === 'patch' ? 'bandage' : 'sparkle', phase.mode === 'patch' ? 'var(--patch)' : 'var(--ovul)', 'i-ic')} ${phase.detail.charAt(0).toUpperCase() + phase.detail.slice(1)}.${phase.bleedDay ? ` Bleeding day <b>${phase.bleedDay}</b>.` : ''}</div>
+      ${(() => {
+        const nb = nextBleedPrediction();
+        if (!nb) return '';
+        return `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} Next withdrawal bleed expected around <b>${fmtDate(nb.expected)}</b>${nb.overdue ? ' — <b>hasn’t arrived yet</b>; the pregnancy check below is watching it' : ''} <span class="muted small">(removal ${fmtDate(nb.removal, { month: 'short', day: 'numeric' })} + ${nb.personalized ? `your usual ${nb.offset}-day delay` : `a typical ${nb.offset}-day delay`})</span>.</div>`;
+      })()}
       ${phase.mode === 'patch' ? `<div class="insight-line muted small">On the patch there's no follicular/ovulation/luteal cycle — hormones stay steady, then drop in the patch-free week. That drop is what causes the withdrawal bleed.</div>` : `<div class="insight-line muted small">Phases estimated from your ${phase.cycleLen}-day average (${predictionConfidence()}).</div>`}`;
   }
 
@@ -1741,7 +1822,13 @@ function renderInsights() {
         </div>
         <span class="cyc-len">${c.len}d${c.ongoing ? '…' : ''}</span>
       </div>`).join('') +
-      `<p class="muted small" style="margin:8px 0 0">Pink = bleeding days. Bars line up at day 1${state.settings.onPatch ? ' — on the patch these are withdrawal bleeds' : ''}.</p>`;
+      `<p class="muted small" style="margin:8px 0 0">Pink = bleeding days. Bars line up at day 1${state.settings.onPatch ? ' — on the patch these are withdrawal bleeds' : ''}.</p>` +
+      (() => {
+        const tr = bleedLengthTrend();
+        if (!tr) return '';
+        if (tr.dir === 'steady') return `<div class="insight-line muted small" style="margin-top:8px">Bleed length is steady across your ${tr.n} logged bleeds.</div>`;
+        return `<div class="insight-line" style="margin-top:8px">${ic('drop', 'var(--period)', 'i-ic')} Your bleeds have gotten <b>${tr.dir}</b> — about ${tr.early} days early on vs ${tr.late} days recently.${tr.dir === 'longer' ? ' Gradual is common, but a sudden jump is worth mentioning to a clinician.' : ' Lighter, shorter bleeds are typical as your body settles on the patch.'}</div>`;
+      })();
   }
 
   // symptom patterns from calendar logs — natural-language insight cards first,
@@ -1808,7 +1895,13 @@ function renderInsights() {
       <div class="insight-line">${adh.streak >= 2
         ? ic('sparkle', 'var(--patch)', 'i-ic') + ` <b>${adh.streak} changes in a row</b> with protection maintained — keep it up!`
         : ic('check', 'var(--ok)', 'i-ic') + ` Protection maintained on <b>${adh.protectedRate}%</b> of your logged changes.`}</div>
-      ${hfNote}`;
+      ${hfNote}
+      ${(() => {
+        const dp = detachmentPatterns();
+        if (!dp) return '';
+        if (!dp.top && !dp.topSite) return `<div class="insight-line muted small">${dp.total} fall-offs logged — add placements when you apply and Petal can spot which sites don't hold.</div>`;
+        return `<div class="insight-line">${ic('warn', 'var(--patch)', 'i-ic')} <b>${dp.topCount} of your ${dp.total} fall-offs</b> were <b>${dp.topSite.toLowerCase()}</b> placements — that spot may not hold well for you (lotion, waistbands, and friction are common culprits).</div>`;
+      })()}`;
   }
 
   // patch history (on time / late, derived from logged dates)
