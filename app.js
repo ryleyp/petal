@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v17'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v18'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -113,6 +113,19 @@ function toast(msg) {
   t.style.opacity = '1';
   clearTimeout(toast._t);
   toast._t = setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.classList.add('hidden'), 300); }, 1900);
+}
+// toast with a 6-second Undo button — mis-taps shouldn't need calendar surgery
+function toastUndo(msg, undoFn) {
+  const t = $('#toast');
+  t.innerHTML = `${escapeHtml(msg)} <button class="toast-undo" type="button">Undo</button>`;
+  t.classList.remove('hidden'); t.style.opacity = '1';
+  t.querySelector('.toast-undo').addEventListener('click', () => {
+    clearTimeout(toast._t);
+    t.style.opacity = '0'; setTimeout(() => t.classList.add('hidden'), 300);
+    undoFn();
+  });
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => { t.style.opacity = '0'; setTimeout(() => t.classList.add('hidden'), 300); }, 6000);
 }
 
 const SYMPTOMS = ['Cramps', 'Headache', 'Bloating', 'Tender breasts', 'Acne', 'Fatigue',
@@ -338,7 +351,7 @@ function startPeriod(dateStr) {
   if (hasStartMarker(dateStr)) { toast('Already marked'); return; }
   state.periods.push({ start: dateStr });
   saveState(); renderAll();
-  toast('Period start marked — the end is implied when your bleeding logs stop');
+  toastUndo('Period start marked', () => unmarkStart(dateStr));
 }
 function unmarkStart(dateStr) {
   // only removes simple markers; legacy start–end ranges are left alone
@@ -671,6 +684,149 @@ function riskCrossref() {
   return { windows, hits: [...new Set(hits)] };
 }
 
+/* ---- Cycle phase, pregnancy check & bleeding health ---- */
+
+// consecutive bleeding days ending today (0 if not bleeding today)
+function bleedDayNumber() {
+  let n = 0, d = today();
+  while (state.logs[iso(d)] && state.logs[iso(d)].flow) { n++; d = addDays(d, -1); }
+  return n;
+}
+
+/* Where you are right now. On the patch the honest phases are hormone vs
+ * withdrawal (ovulation is suppressed, so follicular/luteal don't apply);
+ * off the patch we estimate the classic phases from your average cycle. */
+function phaseInfo() {
+  const tISO = todayISO();
+  const s = cycleStats();
+  const bleedDay = bleedDayNumber();
+  if (state.settings.onPatch && cycleAnchor()) {
+    const cd = patchCycleDay(tISO);
+    if (cd === null) return null;
+    const week = Math.floor(cd / 7) + 1;
+    return {
+      mode: 'patch', cycleDay: cd + 1, cycleLen: 28, bleedDay,
+      label: isPatchFree(cd) ? 'Withdrawal phase' : 'Hormone phase',
+      detail: isPatchFree(cd)
+        ? `patch-free week — hormone levels drop, which triggers the withdrawal bleed`
+        : `patch week ${week} — steady hormones, ovulation suppressed`,
+    };
+  }
+  if (!s.lastStart) return null;
+  const cycleDay = daysBetween(s.lastStart, tISO) + 1;
+  const ovulDay = s.avgCycle - (state.settings.lutealLen || 14);
+  let label, detail;
+  if (bleedDay) { label = 'Menstrual'; detail = `bleeding day ${bleedDay}`; }
+  else if (cycleDay > s.avgCycle) { label = 'Late'; detail = `${cycleDay - s.avgCycle} day${cycleDay - s.avgCycle === 1 ? '' : 's'} past your average cycle`; }
+  else if (cycleDay === ovulDay) { label = 'Ovulation (estimated)'; detail = 'peak fertility'; }
+  else if (cycleDay >= ovulDay - 5 && cycleDay < ovulDay) { label = 'Fertile window'; detail = 'conception is most likely in these days'; }
+  else if (cycleDay < ovulDay - 5) { label = 'Follicular'; detail = 'body prepares an egg; fertility is lower but not zero'; }
+  else { label = 'Luteal'; detail = 'after estimated ovulation, heading toward your next period'; }
+  return { mode: 'natural', cycleDay, cycleLen: s.avgCycle, bleedDay, label, detail };
+}
+
+/* All patch-cycle starts (anchors + each 28-day repeat up to today). */
+function allCycleStarts() {
+  const anchors = cycleAnchors();
+  if (!anchors.length) return [];
+  const starts = [];
+  const t = today();
+  for (let i = 0; i < anchors.length; i++) {
+    const bound = i + 1 < anchors.length ? parseISO(anchors[i + 1]) : addDays(t, 1);
+    let d = parseISO(anchors[i]), guard = 0;
+    while (d < bound && d <= t && guard++ < 40) { starts.push(iso(d)); d = addDays(d, PATCH_CYCLE); }
+  }
+  return starts;
+}
+
+/* Honest pregnancy assessment from timing — dates and label guidance, never a
+ * made-up probability. Levels: none | info | test. */
+function pregnancyCheck() {
+  const tISO = todayISO();
+  const lines = [];
+  let level = 'none';
+  const bump = (l) => { if (l === 'test' || (l === 'info' && level === 'none')) level = l; };
+
+  // a recent logged positive test outranks everything
+  const posDay = Object.keys(state.logs).filter((d) => (state.logs[d].tags || []).includes('test-pos')).sort().pop();
+  if (posDay && daysBetween(posDay, tISO) <= 60) {
+    return { level: 'test', lines: [`You logged a <b>positive pregnancy test</b> (${fmtDate(posDay)}). Please talk to a clinician about next steps.`] };
+  }
+  const rc = riskCrossref();
+  const recentUnprotected = rc.hits.some((h) => daysBetween(h, tISO) <= 35);
+
+  if (state.settings.onPatch && cycleAnchor()) {
+    // check the last few completed patch-free windows for a withdrawal bleed
+    const firstData = [...Object.keys(state.logs), ...((state.patchActions || []).map((a) => a.date))].sort()[0] || tISO;
+    const windows = allCycleStarts()
+      .filter((s) => s >= firstData) // don't judge cycles from before you started logging
+      .map((s) => ({ from: iso(addDays(parseISO(s), 20)), to: iso(addDays(parseISO(s), 29)), start: s }))
+      .filter((w) => w.to < tISO); // only fully evaluable windows
+    const recent = windows.slice(-3).reverse();
+    let missed = 0;
+    for (const w of recent) {
+      const bled = Object.keys(state.logs).some((d) => d >= w.from && d <= w.to && state.logs[d].flow);
+      if (!bled) missed++; else break;
+    }
+    const riskThatCycle = recent[0] && riskWindows().some((rw) => rw.from <= iso(addDays(parseISO(recent[0].start), 28)) && rw.to >= recent[0].start);
+    if (!recent.length) {
+      lines.push('Not enough completed patch-free weeks logged yet to check your bleed timing.');
+    } else if (missed >= 2) {
+      bump('test');
+      lines.push(`<b>No withdrawal bleed in your last ${missed} patch-free weeks.</b> The patch label advises taking a <b>pregnancy test</b> when two bleeds in a row are missed.`);
+    } else if (missed === 1 && (riskThatCycle || recentUnprotected)) {
+      bump('test');
+      lines.push(`<b>You skipped your last withdrawal bleed after a cycle with possible reduced protection.</b> Take a <b>pregnancy test</b> to be sure.`);
+    } else if (missed === 1) {
+      bump('info');
+      lines.push(`No bleed showed up in your last patch-free week. With consistent use this can be normal — bleeds on the patch are often light or occasionally absent. If it happens twice in a row, test.`);
+    } else {
+      lines.push(`Your withdrawal bleeds are arriving when expected — <b>no pregnancy signals from your timing</b>.`);
+    }
+    if (recentUnprotected && missed === 0) {
+      bump('info');
+      lines.push(`You logged unprotected sex during a reduced-protection window recently — your next patch-free week's bleed is the checkpoint to watch.`);
+    }
+  } else {
+    const s = cycleStats();
+    if (!s.lastStart) return { level: 'none', lines: ['Log a period or two and Petal can check your timing.'] };
+    const late = daysBetween(s.lastStart, tISO) + 1 - s.avgCycle;
+    if (late >= 7 || (late >= 5 && recentUnprotected)) {
+      bump('test');
+      lines.push(`<b>Your period is ${late} days past your ${s.avgCycle}-day average.</b> That's the point where a <b>pregnancy test</b> gives a reliable answer.`);
+    } else if (late >= 1) {
+      bump('info');
+      lines.push(`You're ${late} day${late === 1 ? '' : 's'} past your average — a few days of drift is common (stress, travel, illness). Test if it reaches a week.`);
+    } else {
+      lines.push(`Your timing looks on track — <b>no pregnancy signals</b>.`);
+    }
+  }
+  return { level, lines };
+}
+
+/* Gentle, factual bleeding-health flags — never diagnoses. */
+function bleedingHealth() {
+  const lines = [];
+  const ps = sortedPeriods();
+  const last = ps[ps.length - 1];
+  if (last) {
+    const len = daysBetween(last.start, last.end || last.start) + 1;
+    if (len >= 8) lines.push(`Your ${last.ongoing ? 'current' : 'last'} bleed ${last.ongoing ? 'has lasted' : 'lasted'} <b>${len} days</b>${last.ongoing ? ' so far' : ''} — bleeds over 7–8 days are worth mentioning to a clinician, especially if heavy.`);
+  }
+  // breakthrough bleeding recurring across several recent patch cycles
+  if (state.settings.onPatch) {
+    const starts = allCycleStarts().slice(-4);
+    let cyclesWithBt = 0;
+    for (const st of starts) {
+      const end = iso(addDays(parseISO(st), 20)); // hormone weeks only
+      if (Object.keys(state.logs).some((d) => d >= st && d <= end && state.logs[d].flow &&
+        (state.logs[d].bleedType === 'breakthrough' || state.logs[d].flow === 'spotting'))) cyclesWithBt++;
+    }
+    if (cyclesWithBt >= 3) lines.push(`You've had breakthrough bleeding/spotting during the patch weeks in <b>${cyclesWithBt} recent cycles</b>. Common in early patch use, but if it persists it's worth a clinician chat — sometimes it also follows late changes.`);
+  }
+  return lines;
+}
+
 /* Adherence stats across everything logged in the calendar. */
 function patchAdherence() {
   const hist = patchHistory(); // newest first
@@ -989,6 +1145,22 @@ function renderAlerts() {
       <div class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</div></div></div>`);
   }
 
+  // pregnancy-timing signal (only when it's test-worthy — no noise)
+  const preg = pregnancyCheck();
+  if (preg.level === 'test') {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="alert due">${ic('warn', 'var(--accent)')}<div>${preg.lines[0]} <span class="muted small">Details in Insights.</span></div></div>`);
+  }
+
+  // prolonged ongoing bleed
+  {
+    const last = sortedPeriods().slice(-1)[0];
+    if (last && last.ongoing && daysBetween(last.start, last.end) + 1 >= 8) {
+      box.insertAdjacentHTML('beforeend',
+        `<div class="alert">${ic('drop', 'var(--period)')}<div>You've been bleeding <b>${daysBetween(last.start, last.end) + 1} days</b> — bleeds over 7–8 days are worth mentioning to a clinician, especially if heavy.</div></div>`);
+    }
+  }
+
   // streak encouragement — your logged changes, working for you
   const adh = patchAdherence();
   if (adh && adh.streak >= 3 && (!a || a.level === 'ok')) {
@@ -1016,10 +1188,15 @@ $('#saveToday').addEventListener('click', () => {
   const symptoms = $$('#symptomChips .chip.on').map((c) => c.dataset.sym);
   const tags = $$('#intimacyChips .chip.on').map((c) => c.dataset.tag);
   const notes = $('#todayNotes').value.trim();
+  const prevLog = state.logs[tISO] ? JSON.parse(JSON.stringify(state.logs[tISO])) : undefined;
   if (!flow && !symptoms.length && !tags.length && !notes) { delete state.logs[tISO]; }
   else state.logs[tISO] = { flow, bleedType, symptoms, tags, notes };
   // periods are derived from consecutive bleeding days — no manual entry needed
-  saveState(); renderAll(); toast('Saved');
+  saveState(); renderAll();
+  toastUndo('Saved', () => {
+    if (prevLog === undefined) delete state.logs[tISO]; else state.logs[tISO] = prevLog;
+    saveState(); renderAll(); toast('Restored');
+  });
 });
 
 $('#flowSeg').addEventListener('click', (e) => {
@@ -1104,7 +1281,15 @@ function logPatchActionOn(ds, action) {
     state.settings.patchesLeft = Math.max(0, state.settings.patchesLeft - 1);
   }
   saveState(); hydrateSettings(); renderAll();
-  flashAssessment(action === 'apply' ? 'Patch applied' : 'Patch removed');
+  const a = assessPatch();
+  const msg = (a && a.level !== 'ok') ? a.title : (action === 'apply' ? 'Patch applied' : 'Patch removed');
+  if (isNew) {
+    toastUndo(msg, () => {
+      document.querySelector('.site-modal')?.remove();
+      unlogPatchActionOn(ds, action);
+      if (!$('#dayDetail').classList.contains('hidden')) showDayDetail(ds);
+    });
+  } else toast(msg);
   if (action === 'apply' && isNew) promptSiteFor(ds);
 }
 
@@ -1167,12 +1352,38 @@ function unlogPatchActionOn(ds, action) {
   saveState(); renderAll(); toast('Removed log');
 }
 function patchActionsOn(ds) { return (state.patchActions || []).filter((a) => a.date === ds); }
-// after a patch action, toast a short honest status if anything needs attention
-function flashAssessment(fallback) {
-  const a = assessPatch();
-  if (a && a.level !== 'ok') toast(a.title);
-  else toast(fallback);
-}
+
+/* ---- Backfill: enter a past bleeding range in one go ---- */
+$('#backfillBtn').addEventListener('click', () => {
+  const from = prompt('Bleeding started (YYYY-MM-DD):');
+  if (!from) return;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) { toast('Use YYYY-MM-DD'); return; }
+  const to = prompt('Last bleeding day (YYYY-MM-DD):', from);
+  if (!to) return;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) { toast('End must be a valid date on/after the start'); return; }
+  if (daysBetween(from, to) > 20) { toast('That range is over 20 days — enter it in smaller chunks'); return; }
+  const written = [];
+  let d = parseISO(from);
+  const e = parseISO(to);
+  while (d <= e) {
+    const ds = iso(d);
+    const log = state.logs[ds] || { flow: '', bleedType: '', symptoms: [], tags: [], notes: '' };
+    if (!log.flow) { log.flow = 'medium'; state.logs[ds] = log; written.push(ds); }
+    d = addDays(d, 1);
+  }
+  saveState(); renderAll();
+  calCursor = new Date(parseISO(from).getFullYear(), parseISO(from).getMonth(), 1);
+  renderCalendar();
+  toastUndo(`Backfilled ${written.length} day${written.length === 1 ? '' : 's'} of bleeding`, () => {
+    for (const ds of written) {
+      const log = state.logs[ds];
+      if (!log) continue;
+      log.flow = ''; log.bleedType = '';
+      if (!log.symptoms?.length && !log.tags?.length && !log.notes) delete state.logs[ds];
+    }
+    saveState(); renderAll(); toast('Backfill undone');
+  });
+});
 
 /* ---- Calendar ---- */
 let calCursor = today();
@@ -1442,6 +1653,32 @@ function renderInsights() {
     <div class="stat"><div class="big">${s.avgPeriod || '—'}</div><div class="lbl">avg period (days)</div></div>
     <div class="stat"><div class="big">${s.count}</div><div class="lbl">cycles logged</div></div>
     <div class="stat"><div class="big">${variability(s.lengths)}</div><div class="lbl">regularity</div></div>`;
+
+  // where you are in the cycle right now
+  const pc = $('#phaseCard');
+  const phase = phaseInfo();
+  if (!phase) {
+    pc.innerHTML = '<p class="muted small">Set your patch schedule or log a period and your current phase shows here.</p>';
+  } else {
+    pc.innerHTML = `
+      <div class="insights" style="margin-bottom:10px">
+        <div class="stat"><div class="big">${phase.cycleDay}</div><div class="lbl">day of ${phase.cycleLen}</div></div>
+        <div class="stat"><div class="big" style="font-size:19px;line-height:1.2;padding-top:6px">${phase.label}</div><div class="lbl">current phase</div></div>
+      </div>
+      <div class="insight-line">${ic(phase.mode === 'patch' ? 'bandage' : 'sparkle', phase.mode === 'patch' ? 'var(--patch)' : 'var(--ovul)', 'i-ic')} ${phase.detail.charAt(0).toUpperCase() + phase.detail.slice(1)}.${phase.bleedDay ? ` Bleeding day <b>${phase.bleedDay}</b>.` : ''}</div>
+      ${phase.mode === 'patch' ? `<div class="insight-line muted small">On the patch there's no follicular/ovulation/luteal cycle — hormones stay steady, then drop in the patch-free week. That drop is what causes the withdrawal bleed.</div>` : `<div class="insight-line muted small">Phases estimated from your ${phase.cycleLen}-day average (${predictionConfidence()}).</div>`}`;
+  }
+
+  // pregnancy check — timing-based, factual
+  const pg = $('#pregCheck');
+  const preg = pregnancyCheck();
+  const bh = bleedingHealth();
+  const PREG_META = { none: ['check', 'var(--ok)'], info: ['clock', 'var(--patch)'], test: ['warn', 'var(--accent)'] };
+  const [pIcon, pColor] = PREG_META[preg.level];
+  pg.innerHTML = preg.lines.map((l, i) =>
+    `<div class="insight-line"${preg.level === 'test' && i === 0 ? ' style="border-left:3px solid var(--accent)"' : ''}>${i === 0 ? ic(pIcon, pColor, 'i-ic') + ' ' : ''}${l}</div>`).join('') +
+    (preg.level === 'test' ? `<p class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</p>` : '') +
+    bh.map((l) => `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} ${l}</div>`).join('');
 
   // ovulation insight
   const ob = $('#ovulationInsight');

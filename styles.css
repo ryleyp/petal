@@ -335,3 +335,7 @@ main#views {
   background: #000a; color: #fff; padding: 11px 18px; border-radius: 999px; font-size: 14px; z-index: 50;
   transition: opacity .25s; max-width: 90%;
 }
+.toast-undo {
+  background: none; border: none; color: var(--accent); font-weight: 700; font-size: 14px;
+  margin-left: 10px; padding: 2px 4px; text-transform: uppercase; letter-spacing: 0.5px;
+}
