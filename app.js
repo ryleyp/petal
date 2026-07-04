@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v29'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v32'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -88,7 +88,8 @@ function defaultState() {
   return {
     version: 2,
     settings: { cycleLen: 28, lutealLen: 14, onPatch: true, patchStart: null,
-      reminderTime: '09:00', patchDayOfWeek: null, lastBackup: null,
+      reminderTime: '09:00', edgeCheckReminder: true, backupReminder: true,
+      patchDayOfWeek: null, lastBackup: null,
       patchesLeft: null, patchExpiry: null, customSymptoms: [], doctorQuestions: [] },
     periods: [],                 // [{ start:'YYYY-MM-DD', end:'YYYY-MM-DD'|null }]
     logs: {},                    // { 'YYYY-MM-DD': { flow, bleedType, symptoms:[], tags:[], notes } }
@@ -142,8 +143,14 @@ const SYMPTOMS = ['Cramps', 'Headache', 'Bloating', 'Tender breasts', 'Acne', 'F
   'Mood swings', 'Anxiety', 'Irritability', 'Stress', 'Poor sleep', 'Nausea',
   'Back pain', 'Cravings', 'Low energy', 'High energy', 'Clots', 'Brown discharge'];
 
-// Approved patch sites (per combined-patch labeling: never on breasts)
-const SITES = ['Left arm', 'Right arm', 'Abdomen', 'Left buttock', 'Right buttock', 'Upper back'];
+// Zafemy-approved patch areas, split left/right so rotation stats are useful.
+// Per labeling: never on breasts, cut/irritated skin, or the exact previous location.
+const SITES = [
+  'Left upper outer arm', 'Right upper outer arm',
+  'Left abdomen', 'Right abdomen',
+  'Left buttock', 'Right buttock',
+  'Left upper back', 'Right upper back',
+];
 
 // Private log tags (sex / EC / tests) — stored only in the encrypted day log
 const INTIMACY = [
@@ -585,6 +592,140 @@ function recordPatchAction(action, dateStr) {
   }
 }
 
+function currentPatchWear() {
+  const acts = sortedActions();
+  const lastApply = [...acts].reverse().find((a) => a.action === 'apply');
+  const lastOff = [...acts].reverse().find((a) => a.action === 'remove' || a.action === 'detached');
+  const patchOn = !!(lastApply && (!lastOff || lastApply.date >= lastOff.date));
+  if (patchOn) {
+    const daysOn = daysBetween(lastApply.date, todayISO());
+    return {
+      patchOn,
+      applyDate: lastApply.date,
+      site: lastApply.site || null,
+      daysOn,
+      dueDate: iso(addDays(parseISO(lastApply.date), 7)),
+    };
+  }
+  if (lastOff) {
+    return {
+      patchOn: false,
+      offDate: lastOff.date,
+      offAction: lastOff.action,
+      daysOff: daysBetween(lastOff.date, todayISO()),
+      dueDate: iso(addDays(parseISO(lastOff.date), 7)),
+    };
+  }
+  return { patchOn: false };
+}
+
+function siteStats() {
+  const applies = sortedActions().filter((a) => a.action === 'apply');
+  const sited = applies.filter((a) => a.site);
+  const counts = Object.fromEntries(SITES.map((s) => [s, 0]));
+  for (const a of sited) counts[a.site] = (counts[a.site] || 0) + 1;
+  let sameRepeats = 0, last = null, recentRepeat = null;
+  for (const a of applies) {
+    if (!a.site) continue;
+    if (last && last.site === a.site) { sameRepeats++; recentRepeat = a.site; }
+    last = a;
+  }
+  const lastSite = last ? last.site : null;
+  const next = SITES
+    .filter((s) => s !== lastSite)
+    .sort((a, b) => (counts[a] - counts[b]) || a.localeCompare(b));
+  return {
+    applies: applies.length,
+    sited: sited.length,
+    counts,
+    sameRepeats,
+    recentRepeat,
+    lastSite,
+    nextSites: next.slice(0, 3),
+    missing: applies.length - sited.length,
+  };
+}
+
+function patchTimingStats() {
+  const acts = sortedActions();
+  const wear = [], offGaps = [], weeklyGaps = [];
+  let prev = null;
+  for (const a of acts) {
+    if (prev && prev.action === 'apply' && (a.action === 'apply' || a.action === 'remove' || a.action === 'detached')) {
+      wear.push(daysBetween(prev.date, a.date));
+      if (a.action === 'apply') weeklyGaps.push(daysBetween(prev.date, a.date));
+    }
+    if (prev && (prev.action === 'remove' || prev.action === 'detached') && a.action === 'apply') {
+      offGaps.push(daysBetween(prev.date, a.date));
+    }
+    prev = a;
+  }
+  const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length * 10) / 10 : null;
+  const hist = patchHistory();
+  return {
+    avgWear: avg(wear),
+    wearCount: wear.length,
+    longWear: wear.filter((n) => n > 7).length,
+    avgPatchFree: avg(offGaps),
+    maxPatchFree: offGaps.length ? Math.max(...offGaps) : null,
+    lateChanges: hist.filter((e) => e.kind === 'late').length,
+    riskEvents: hist.filter((e) => e.status === 'risk').length,
+    weeklyOffDay: weeklyGaps.filter((n) => n !== 7).length,
+  };
+}
+
+function patchAssistant() {
+  if (!state.settings.onPatch || !cycleAnchor()) return null;
+  const a = assessPatch();
+  const wear = currentPatchWear();
+  const rotation = siteStats();
+  const evs = patchEvents(4);
+  const next = evs.find((e) => daysBetween(todayISO(), e.date) >= 0);
+  const lines = [];
+  if (wear.patchOn) {
+    const site = wear.site ? ` on ${wear.site.toLowerCase()}` : '';
+    lines.push(`${ic('bandage', 'var(--patch)', 'i-ic')} Current sticker: <b>${wear.daysOn} day${wear.daysOn === 1 ? '' : 's'} worn</b>${site}.`);
+    if (!wear.site) lines.push(`${ic('sparkle', 'var(--muted)', 'i-ic')} Add its placement from the Calendar so rotation stats stay complete.`);
+  } else if (wear.offDate) {
+    lines.push(`${ic('moon', 'var(--patchfree)', 'i-ic')} Patch-free: <b>${wear.daysOff} day${wear.daysOff === 1 ? '' : 's'}</b> since ${fmtDate(wear.offDate)}.`);
+  }
+  if (next) {
+    const d = daysBetween(todayISO(), next.date);
+    lines.push(`${ic('calendar', 'var(--patchfree)', 'i-ic')} Next: <b>${next.label}</b> ${d === 0 ? 'today' : d === 1 ? 'tomorrow' : `in ${d} days`}.`);
+  }
+  if (rotation.nextSites.length) {
+    lines.push(`${ic('sparkle', 'var(--ok)', 'i-ic')} Rotation pick: <b>${rotation.nextSites[0].toLowerCase()}</b>${rotation.nextSites[1] ? ` or ${rotation.nextSites[1].toLowerCase()}` : ''}.`);
+  }
+  return {
+    level: a ? a.level : 'ok',
+    title: a ? a.title : 'Patch assistant',
+    message: a ? a.message : 'Your schedule is ready.',
+    lines,
+  };
+}
+
+function patternFlags() {
+  const flags = [];
+  const a = assessPatch();
+  if (a && a.level !== 'ok') flags.push({ level: a.level, icon: a.level === 'risk' ? 'warn' : 'clock', color: a.level === 'risk' ? 'var(--accent)' : 'var(--patch)', text: `<b>${a.title}.</b> ${a.message}` });
+  const ss = siteStats();
+  if (ss.sameRepeats) flags.push({ level: 'caution', icon: 'warn', color: 'var(--patch)', text: `<b>${ss.sameRepeats}</b> consecutive same-site repeat${ss.sameRepeats === 1 ? '' : 's'} logged${ss.recentRepeat ? `, most recently ${ss.recentRepeat.toLowerCase()}` : ''}.` });
+  if (ss.missing && ss.applies >= 2) flags.push({ level: 'info', icon: 'sparkle', color: 'var(--muted)', text: `<b>${ss.missing}</b> application${ss.missing === 1 ? '' : 's'} missing placement, so rotation and fall-off stats are incomplete.` });
+  const timing = patchTimingStats();
+  if (timing.maxPatchFree && timing.maxPatchFree > 7) flags.push({ level: 'risk', icon: 'warn', color: 'var(--accent)', text: `Longest patch-free interval logged: <b>${timing.maxPatchFree} days</b>, over the 7-day limit.` });
+  if (timing.weeklyOffDay >= 2) flags.push({ level: 'caution', icon: 'clock', color: 'var(--patch)', text: `<b>${timing.weeklyOffDay}</b> weekly changes landed off the 7-day rhythm. Your change day may need a reset.` });
+  const det = sortedActions().filter((x) => x.action === 'detached');
+  if (det.length >= 2) flags.push({ level: 'caution', icon: 'warn', color: 'var(--patch)', text: `<b>${det.length}</b> fall-offs logged. Placement, lotion, sweat, friction, and waistbands are worth watching.` });
+  const recentBreakthrough = Object.entries(state.logs).filter(([d, l]) =>
+    d >= iso(addDays(today(), -60)) && l.flow && l.bleedType === 'breakthrough').length;
+  if (recentBreakthrough >= 4) flags.push({ level: 'info', icon: 'drop', color: 'var(--period)', text: `<b>${recentBreakthrough}</b> breakthrough bleeding days logged in the last 60 days.` });
+  const lastBackup = state.settings.lastBackup;
+  if (state.settings.backupReminder !== false && (!lastBackup || daysBetween(lastBackup, todayISO()) >= 30)) {
+    flags.push({ level: 'info', icon: 'backup', color: 'var(--fertile)', text: `Encrypted backup is ${lastBackup ? `${daysBetween(lastBackup, todayISO())} days old` : 'not exported yet'}.` });
+  }
+  return flags;
+}
+
 /* ---- Honest "what changes when I'm off-schedule" engine ----
  * The contraceptive patch (combined estrogen+progestin) prevents pregnancy mainly by
  * SUPPRESSING OVULATION. The one thing that restores the risk of ovulation is a
@@ -720,7 +861,7 @@ function patchHistory() {
         else { status = 'risk'; note = `Hormone-free ${gap}d (>7) — ovulation risk`; }
       }
     }
-    out.push({ date: a.date, action: a.action, status, note, kind, delta, hfGap });
+    out.push({ date: a.date, action: a.action, site: a.site || null, status, note, kind, delta, hfGap });
     prev = a;
   }
   return out.reverse();
@@ -994,6 +1135,88 @@ function patchAdherence() {
   };
 }
 
+function zafemyStickerInsights() {
+  const acts = sortedActions();
+  const applies = acts.filter((a) => a.action === 'apply');
+  const detaches = acts.filter((a) => a.action === 'detached');
+  const timing = patchTimingStats();
+  const sited = applies.filter((a) => a.site);
+  const siteCounts = {};
+  for (const a of sited) siteCounts[a.site] = (siteCounts[a.site] || 0) + 1;
+  const topSite = Object.entries(siteCounts).sort((a, b) => b[1] - a[1])[0] || null;
+  const changeDayCounts = {};
+  for (const a of applies) {
+    const day = parseISO(a.date).toLocaleDateString(undefined, { weekday: 'long' });
+    changeDayCounts[day] = (changeDayCounts[day] || 0) + 1;
+  }
+  const topChangeDay = Object.entries(changeDayCounts).sort((a, b) => b[1] - a[1])[0] || null;
+  let sameSiteRepeats = 0;
+  let lastSited = null;
+  let mostRecentRepeat = null;
+  for (const a of applies) {
+    if (!a.site) continue;
+    if (lastSited && lastSited.site === a.site) {
+      sameSiteRepeats++;
+      mostRecentRepeat = a.site;
+    }
+    lastSited = a;
+  }
+  const lastApply = [...acts].reverse().find((a) => a.action === 'apply');
+  const lastOff = [...acts].reverse().find((a) => a.action === 'remove' || a.action === 'detached');
+  const patchOn = lastApply && (!lastOff || lastApply.date >= lastOff.date);
+  const lines = [];
+  if (!applies.length) {
+    lines.push(`${ic('bandage', 'var(--patch)', 'i-ic')} Log each Zafemy application and placement to unlock timing, rotation, and fall-off insights.`);
+  } else if (patchOn) {
+    const daysOn = daysBetween(lastApply.date, todayISO());
+    const site = lastApply.site ? ` on ${lastApply.site.toLowerCase()}` : '';
+    if (daysOn < 7) lines.push(`${ic('clock', 'var(--patch)', 'i-ic')} Current sticker has been on <b>${daysOn} day${daysOn === 1 ? '' : 's'}</b>${site}; change it in <b>${7 - daysOn}</b> day${7 - daysOn === 1 ? '' : 's'}.`);
+    else if (daysOn === 7) lines.push(`${ic('clock', 'var(--patch)', 'i-ic')} Current sticker reaches <b>7 days today</b>${site}; this is your change/removal checkpoint.`);
+    else lines.push(`${ic('warn', 'var(--accent)', 'i-ic')} Current sticker has been on <b>${daysOn} days</b>${site}. Zafemy is designed around a weekly Patch Change Day, so log the change/removal when it happens.`);
+  } else if (lastOff) {
+    const daysOff = daysBetween(lastOff.date, todayISO());
+    lines.push(`${ic('moon', 'var(--patchfree)', 'i-ic')} You have been patch-free for <b>${daysOff} day${daysOff === 1 ? '' : 's'}</b>. Zafemy should not have more than a 7-day patch-free interval between cycles.`);
+  }
+  if (topChangeDay && applies.length >= 2) {
+    const offDay = applies.length - topChangeDay[1];
+    lines.push(`${ic('calendar', 'var(--patchfree)', 'i-ic')} Your logged Patch Change Day is usually <b>${topChangeDay[0]}</b>${offDay ? `; <b>${offDay}</b> application${offDay === 1 ? '' : 's'} landed on another weekday.` : ', with every logged application on that weekday.'}`);
+  }
+  if (timing.avgWear) {
+    lines.push(`${ic('clock', 'var(--patch)', 'i-ic')} Average logged wear time is <b>${timing.avgWear} days</b>${timing.longWear ? `, with <b>${timing.longWear}</b> sticker${timing.longWear === 1 ? '' : 's'} worn over 7 days` : ', right around the weekly rhythm'}.`);
+  }
+  if (timing.avgPatchFree) {
+    lines.push(`${ic('moon', 'var(--patchfree)', 'i-ic')} Average patch-free interval is <b>${timing.avgPatchFree} days</b>${timing.maxPatchFree > 7 ? `; longest was <b>${timing.maxPatchFree} days</b>, above the 7-day limit` : ', within the 7-day limit so far'}.`);
+  }
+  if (applies.length && sited.length < applies.length) {
+    const missing = applies.length - sited.length;
+    lines.push(`${ic('sparkle', 'var(--muted)', 'i-ic')} <b>${missing}</b> application${missing === 1 ? '' : 's'} ${missing === 1 ? 'is' : 'are'} missing placement, so rotation stats are incomplete.`);
+  }
+  if (sameSiteRepeats) {
+    lines.push(`${ic('warn', 'var(--patch)', 'i-ic')} Same-site repeat${sameSiteRepeats === 1 ? '' : 's'} logged: <b>${sameSiteRepeats}</b>${mostRecentRepeat ? `, most recently ${mostRecentRepeat.toLowerCase()}` : ''}. Zafemy labeling says not to use the same location as the previous sticker.`);
+  } else if (sited.length >= 2) {
+    lines.push(`${ic('check', 'var(--ok)', 'i-ic')} No consecutive same-site repeats in your logged placements.`);
+  }
+  if (topSite && sited.length >= 3) {
+    lines.push(`${ic('bandage', 'var(--patch)', 'i-ic')} Most-used placement: <b>${topSite[0].toLowerCase()}</b> (${topSite[1]} of ${sited.length}). Rotate toward a less-used approved area next time.`);
+  }
+  const dp = detachmentPatterns();
+  if (dp && dp.topSite) {
+    lines.push(`${ic('warn', 'var(--accent)', 'i-ic')} Fall-off pattern: <b>${dp.topCount} of ${dp.sited}</b> sited fall-offs were from <b>${dp.topSite.toLowerCase()}</b>. Friction, lotion, sweat, and waistbands are worth watching there.`);
+  } else if (detaches.length) {
+    lines.push(`${ic('warn', 'var(--muted)', 'i-ic')} <b>${detaches.length}</b> fall-off${detaches.length === 1 ? '' : 's'} logged. Add placement each time so Petal can spot where the sticker does not hold.`);
+  }
+  lines.push(`${ic('check', 'var(--ok)', 'i-ic')} Zafemy basics: one sticker at a time, clean/dry skin, avoid breasts/cut/irritated skin, press firmly for 10 seconds, and check the edges daily.`);
+  return {
+    stats: [
+      ['Applied', applies.length],
+      ['Placements', sited.length],
+      ['Avg wear', timing.avgWear ? `${timing.avgWear}d` : '—'],
+      ['Fall-offs', detaches.length],
+    ],
+    lines,
+  };
+}
+
 // Which quarter of the 28-day patch cycle a date falls in, or null off-patch.
 function cyclePosition(dateStr) {
   const cd = patchCycleDay(dateStr);
@@ -1087,7 +1310,16 @@ function dayInfo(dateStr) {
 }
 
 /* ============================================================ Render ====== */
-function renderAll() { renderToday(); renderCalendar(); renderPatch(); renderInsights(); renderAppointments(); renderDoctorQuestions(); }
+function renderAll() {
+  renderToday();
+  renderPatchAssistant();
+  renderCalendar();
+  renderPatch();
+  renderInsights();
+  renderAppointments();
+  renderDoctorQuestions();
+  renderBackupHealth();
+}
 
 /* ---- Cycle ring (Clue-style) ---- */
 function polar(cx, cy, r, a) { const rad = (a - 90) * Math.PI / 180; return [cx + r * Math.cos(rad), cy + r * Math.sin(rad)]; }
@@ -1240,6 +1472,28 @@ function renderToday() {
   if (log.tags?.length) { $('#intimacyChips').classList.remove('hidden'); $('#intimacyToggle').textContent = 'Hide'; }
 }
 
+function renderPatchAssistant() {
+  const el = $('#patchAssistantCard');
+  if (!el) return;
+  const pa = patchAssistant();
+  if (!pa) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  const m = LEVEL_META[pa.level] || LEVEL_META.ok;
+  el.innerHTML = `
+    <div class="card-head"><h2>${m.icon()} Patch change assistant</h2></div>
+    <div class="guidance ${pa.level}">
+      <h3>${escapeHtml(pa.title)}</h3>
+      <div>${pa.message}</div>
+      ${pa.level === 'risk' ? `<div class="disc">${GUIDE_DISCLAIMER}</div>` : ''}
+    </div>
+    ${pa.lines.map((l) => `<div class="insight-line">${l}</div>`).join('')}
+    <button class="btn btn-ghost full btn-ic" data-open-calendar>${ic('calendar', 'var(--patchfree)', 'b-ic')}Log from Calendar</button>`;
+  el.querySelector('[data-open-calendar]').addEventListener('click', () => {
+    const tab = document.querySelector('.tab[data-view="calendar"]');
+    if (tab) tab.click();
+  });
+}
+
 const LEVEL_META = {
   ok: { cls: 'ok', icon: () => ic('check', 'var(--ok)') },
   caution: { cls: 'due', icon: () => ic('clock', 'var(--patch)') },
@@ -1361,6 +1615,7 @@ function renderAlerts() {
 }
 
 function maybeBackupReminder(box) {
+  if (state.settings.backupReminder === false) return;
   const last = state.settings.lastBackup;
   const stale = !last || daysBetween(last, todayISO()) >= 30;
   if (stale && (state.periods.length || (state.patchActions && state.patchActions.length))) {
@@ -1754,6 +2009,8 @@ function renderPatch() {
   }
   $('#patchStart').value = state.settings.patchStart || '';
   $('#reminderTime').value = state.settings.reminderTime || '09:00';
+  $('#edgeCheckReminder').checked = state.settings.edgeCheckReminder !== false;
+  $('#backupReminder').checked = state.settings.backupReminder !== false;
   $('#patchesLeft').value = state.settings.patchesLeft ?? '';
   $('#patchExpiry').value = state.settings.patchExpiry || '';
   const box = $('#patchSchedule'); box.innerHTML = '';
@@ -1783,6 +2040,8 @@ $('#savePatch').addEventListener('click', () => {
   const v = $('#patchStart').value;
   state.settings.patchStart = v || null;
   state.settings.reminderTime = $('#reminderTime').value || '09:00';
+  state.settings.edgeCheckReminder = $('#edgeCheckReminder').checked;
+  state.settings.backupReminder = $('#backupReminder').checked;
   const pl = $('#patchesLeft').value.trim();
   state.settings.patchesLeft = pl === '' ? null : clampNum(pl, 0, 60, null);
   state.settings.patchExpiry = $('#patchExpiry').value || null;
@@ -1860,6 +2119,43 @@ document.querySelector('.helper-btns').addEventListener('click', (e) => {
 });
 
 /* ---- Insights ---- */
+function renderRotationMap() {
+  const box = $('#rotationMap'); if (!box) return;
+  const ss = siteStats();
+  if (!ss.applies) {
+    box.innerHTML = '<p class="muted small">Log a Zafemy application from the Calendar, then choose a placement to build your rotation map.</p>';
+    return;
+  }
+  const max = Math.max(...Object.values(ss.counts), 1);
+  const nextSet = new Set(ss.nextSites);
+  box.innerHTML = `
+    <div class="rotation-grid">
+      ${SITES.map((site) => {
+        const count = ss.counts[site] || 0;
+        const cls = [site === ss.lastSite ? 'last' : '', nextSet.has(site) ? 'next' : ''].filter(Boolean).join(' ');
+        return `<div class="site-tile ${cls}">
+          <span>${site}</span>
+          <b>${count}</b>
+          <i style="width:${Math.max(8, Math.round(100 * count / max))}%"></i>
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="insight-line">${ic('sparkle', 'var(--ok)', 'i-ic')} Suggested next area: <b>${ss.nextSites.length ? ss.nextSites[0].toLowerCase() : 'any approved area'}</b>${ss.lastSite ? `; avoid repeating <b>${ss.lastSite.toLowerCase()}</b> next.` : '.'}</div>
+    ${ss.sameRepeats ? `<div class="insight-line">${ic('warn', 'var(--patch)', 'i-ic')} Same-site repeats logged: <b>${ss.sameRepeats}</b>.</div>` : ''}
+    ${ss.missing ? `<p class="muted small">Missing placement on ${ss.missing} application${ss.missing === 1 ? '' : 's'}.</p>` : ''}`;
+}
+
+function renderPatternFlags() {
+  const box = $('#patternFlags'); if (!box) return;
+  const flags = patternFlags();
+  if (!flags.length) {
+    box.innerHTML = `<div class="insight-line">${ic('check', 'var(--ok)', 'i-ic')} No timing, rotation, backup, or bleeding pattern flags right now.</div>`;
+    return;
+  }
+  box.innerHTML = flags.slice(0, 8).map((f) =>
+    `<div class="insight-line${f.level === 'risk' ? ' flag-risk' : ''}">${ic(f.icon, f.color, 'i-ic')} ${f.text}</div>`).join('');
+}
+
 function renderInsights() {
   const s = cycleStats();
   const bts = bleedTypeStats();
@@ -1995,9 +2291,9 @@ function renderInsights() {
   // then the raw per-symptom counts
   const st = $('#symptomTrends');
   const trends = symptomTrends();
-  if (!trends || !trends.length) {
-    st.innerHTML = '<p class="muted small">Log symptoms on the Today screen and patterns will show up here — like whether cramps cluster in your patch-free week.</p>';
-  } else {
+	  if (!trends || !trends.length) {
+	    st.innerHTML = '<p class="muted small">Log symptoms on the Today screen and patterns will show up here — like whether cramps cluster in your patch-free week.</p>';
+	  } else {
     const clustered = trends.filter((t) => t.clusters);
     const cards = clustered.slice(0, 4).map((t) => {
       const verb = t.dominant === 'free' ? 'usually occur during' : (t.share >= 0.7 ? 'peak during' : 'tend to happen most in');
@@ -2011,11 +2307,23 @@ function renderInsights() {
         : `${t.total}×`}</span></div>`).join('');
     st.innerHTML = cards + btCard + `<div class="history" style="margin-top:${cards || btCard ? '10px' : '0'}">${rows}</div>` + (clustered.length
       ? `<p class="muted small" style="margin-top:8px">Patterns tied to the patch-free week are typical hormone-withdrawal effects. If they're rough, ask your clinician about options — some people shorten the patch-free interval under medical guidance.</p>`
-      : '');
-  }
+	      : '');
+	  }
 
-  // adherence — the honest scoreboard of everything logged in the calendar
-  const ad = $('#adherence');
+  const zi = $('#zafemyInsights');
+  const z = zafemyStickerInsights();
+  zi.innerHTML = `
+    <div class="insights" style="margin-bottom:10px">
+      ${z.stats.map(([label, value]) => `<div class="stat"><div class="big">${value}</div><div class="lbl">${label}</div></div>`).join('')}
+    </div>
+    ${z.lines.map((l) => `<div class="insight-line">${l}</div>`).join('')}
+    <p class="muted small" style="margin-top:8px">Based on your logged Zafemy sticker dates, placement sites, removals, and fall-offs.</p>`;
+
+  renderRotationMap();
+  renderPatternFlags();
+
+	  // adherence — the honest scoreboard of everything logged in the calendar
+	  const ad = $('#adherence');
   const adh = patchAdherence();
   if (!adh) {
     ad.innerHTML = '<p class="muted small">Log your patch changes (Today screen or any day on the Calendar) and Petal will rate each one on time, early, or late — and track your protection.</p>';
@@ -2060,8 +2368,9 @@ function renderInsights() {
         ? ic('bandage', 'var(--patch)', 'h-ic') + ' Applied'
         : (e.action === 'detached' ? ic('bandage', 'var(--muted)', 'h-ic') + ' Fell off'
         : ic('moon', 'var(--patchfree)', 'h-ic') + ' Removed');
+      const place = e.action === 'apply' && e.site ? ` · ${e.site}` : '';
       ph.insertAdjacentHTML('beforeend',
-        `<div class="h-item"><span>${verb} · ${fmtDate(e.date)}</span>` +
+        `<div class="h-item"><span>${verb} · ${fmtDate(e.date)}${place}</span>` +
         `<span style="color:${STATUS_COLOR[e.status]}">${STATUS_META[e.status]()} ${e.note}</span></div>`);
     });
   }
@@ -2102,6 +2411,8 @@ function hydrateSettings() {
   $('#onPatch').checked = !!state.settings.onPatch;
   $('#patchStart').value = state.settings.patchStart || '';
   $('#reminderTime').value = state.settings.reminderTime || '09:00';
+  $('#edgeCheckReminder').checked = state.settings.edgeCheckReminder !== false;
+  $('#backupReminder').checked = state.settings.backupReminder !== false;
   $('#patchesLeft').value = state.settings.patchesLeft ?? '';
 }
 $('#saveSettings').addEventListener('click', () => {
@@ -2111,6 +2422,19 @@ $('#saveSettings').addEventListener('click', () => {
   saveState(); renderAll(); toast('Settings saved');
 });
 function clampNum(v, lo, hi, fb) { v = parseInt(v, 10); if (isNaN(v)) return fb; return Math.min(hi, Math.max(lo, v)); }
+
+function renderBackupHealth() {
+  const box = $('#backupHealth'); if (!box) return;
+  const last = state.settings.lastBackup;
+  const age = last ? daysBetween(last, todayISO()) : null;
+  const vault = localStorage.getItem(VAULT) || '';
+  const level = !last || age >= 30 ? 'caution' : 'ok';
+  box.innerHTML = `
+    <div class="backup-health ${level}">
+      <div>${ic(level === 'ok' ? 'check' : 'backup', level === 'ok' ? 'var(--ok)' : 'var(--fertile)', 'i-ic')} <b>${level === 'ok' ? 'Backup current' : 'Backup recommended'}</b></div>
+      <p class="muted small">${last ? `Last encrypted export: ${fmtDate(last)} (${age} day${age === 1 ? '' : 's'} ago).` : 'No encrypted export logged yet.'} Vault size: ${Math.max(1, Math.round(vault.length / 1024))} KB.</p>
+    </div>`;
+}
 
 $('#changePass').addEventListener('click', async () => {
   const p1 = prompt('New passcode:'); if (p1 === null) return;
@@ -2130,6 +2454,7 @@ $('#exportData').addEventListener('click', () => {
   downloadBlob(blob, `petal-backup-${todayISO()}.json`);
   state.settings.lastBackup = todayISO();
   saveState();
+  renderBackupHealth();
   toast('Encrypted backup exported');
 });
 $('#importData').addEventListener('change', (e) => {
@@ -2241,11 +2566,27 @@ async function requestNotifyPermission() {
   }
 }
 // Fire a notification for a patch task due today (best-effort, only while app/SW alive)
+function reminderEventsForDate(dateStr) {
+  const events = [];
+  const task = patchEvents(26).find((e) => e.date === dateStr);
+  if (task) events.push({ kind: 'patch', label: task.label });
+  const wear = dateStr === todayISO() ? currentPatchWear() : null;
+  const onForDate = dateStr === todayISO() ? wear.patchOn : isPatchOn(patchCycleDay(dateStr));
+  if (state.settings.edgeCheckReminder !== false && onForDate && !task) {
+    events.push({ kind: 'edge', label: 'Check Zafemy edges and placement' });
+  }
+  const lastBackup = state.settings.lastBackup;
+  const backupDue = state.settings.backupReminder !== false
+    && (!lastBackup || daysBetween(lastBackup, dateStr) >= 30);
+  if (backupDue && dateStr === todayISO()) events.push({ kind: 'backup', label: 'Export encrypted Petal backup' });
+  return events;
+}
+
 function fireTodayNotificationIfDue() {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  const ev = patchEvents(1).find((e) => e.date === todayISO());
+  const ev = reminderEventsForDate(todayISO())[0];
   if (!ev) return;
-  const key = 'petal.notified.' + ev.date;
+  const key = 'petal.notified.' + todayISO() + '.' + ev.kind;
   if (localStorage.getItem(key)) return;
   localStorage.setItem(key, '1');
   try { new Notification('Petal — patch reminder', { body: ev.label, icon: './icon-192.png', tag: 'patch' }); } catch {}
@@ -2285,6 +2626,24 @@ function exportICS() {
     lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Patch reminder', 'TRIGGER:-PT0M', 'END:VALARM');
     lines.push('END:VEVENT');
   });
+  if (state.settings.edgeCheckReminder !== false) {
+    const taskDates = new Set(evs.map((e) => e.date));
+    for (let i = 0; i < 84; i++) {
+      const ds = iso(addDays(today(), i));
+      if (taskDates.has(ds) || !isPatchOn(patchCycleDay(ds))) continue;
+      const dt = parseISO(ds); dt.setHours(h, m, 0, 0);
+      const end = new Date(dt.getTime() + 10 * 60000);
+      lines.push('BEGIN:VEVENT');
+      lines.push(`UID:petal-edge-${ds}@petal.local`);
+      lines.push(`DTSTAMP:${stamp}`);
+      lines.push(`DTSTART:${toICSStamp(dt)}`);
+      lines.push(`DTEND:${toICSStamp(end)}`);
+      lines.push('SUMMARY:Check Zafemy patch edges');
+      lines.push('DESCRIPTION:Petal: make sure the patch is still stuck well and the edges are smooth');
+      lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Check patch edges', 'TRIGGER:-PT0M', 'END:VALARM');
+      lines.push('END:VEVENT');
+    }
+  }
   // refill reminder ~5 days before the supply runs out
   const rf = refillStatus();
   if (rf && rf.outDate) {
@@ -2301,6 +2660,22 @@ function exportICS() {
     lines.push(`DESCRIPTION:Petal: your patch supply runs out around ${rf.outDate}`);
     lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Refill reminder', 'TRIGGER:-PT0M', 'END:VALARM');
     lines.push('END:VEVENT');
+  }
+  if (state.settings.backupReminder !== false) {
+    for (let i = 1; i <= 6; i++) {
+      const dt = addDays(today(), i * 30);
+      dt.setHours(h, m, 0, 0);
+      const end = new Date(dt.getTime() + 15 * 60000);
+      lines.push('BEGIN:VEVENT');
+      lines.push(`UID:petal-backup-${iso(dt)}@petal.local`);
+      lines.push(`DTSTAMP:${stamp}`);
+      lines.push(`DTSTART:${toICSStamp(dt)}`);
+      lines.push(`DTEND:${toICSStamp(end)}`);
+      lines.push('SUMMARY:Export encrypted Petal backup');
+      lines.push('DESCRIPTION:Petal: export an encrypted backup and save it to Files or iCloud Drive');
+      lines.push('BEGIN:VALARM', 'ACTION:DISPLAY', 'DESCRIPTION:Export encrypted backup', 'TRIGGER:-PT0M', 'END:VALARM');
+      lines.push('END:VEVENT');
+    }
   }
   lines.push('END:VCALENDAR');
   const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar' });

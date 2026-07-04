@@ -67,6 +67,7 @@
         <div class="hero-sub" id="heroSub"></div>
 
         <div id="alerts"></div>
+        <div id="patchAssistantCard" class="card hidden"></div>
 
         <div class="quick-actions">
           <button class="qa qa-wide" data-quick="period-start">
@@ -202,6 +203,14 @@
             <label>Remind me at</label>
             <input id="reminderTime" type="time" value="09:00" />
           </div>
+          <label class="switch-row">
+            <span>Daily edge-check reminder</span>
+            <input id="edgeCheckReminder" type="checkbox" />
+          </label>
+          <label class="switch-row">
+            <span>Monthly encrypted-backup reminder</span>
+            <input id="backupReminder" type="checkbox" />
+          </label>
           <div class="log-row">
             <label>Patches you have on hand (for refill reminders)</label>
             <input id="patchesLeft" type="number" min="0" max="60" placeholder="e.g. 3 — leave blank to skip" />
@@ -259,6 +268,18 @@
           <div id="symptomTrends"></div>
         </div>
         <div class="card">
+          <div class="card-head"><h2>Location rotation</h2></div>
+          <div id="rotationMap"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Zafemy sticker insights</h2></div>
+          <div id="zafemyInsights"></div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h2>Pattern flags</h2></div>
+          <div id="patternFlags"></div>
+        </div>
+        <div class="card">
           <div class="card-head"><h2>Patch adherence</h2></div>
           <div id="adherence"></div>
         </div>
@@ -302,6 +323,7 @@
 
         <div class="card">
           <div class="card-head"><h2>Security &amp; data</h2></div>
+          <div id="backupHealth"></div>
           <button id="changePass" class="btn btn-ghost full">Change passcode</button>
           <button id="checkUpdates" class="btn btn-ghost full">Check for app updates</button>
           <button id="exportData" class="btn btn-ghost full">Export encrypted backup</button>
