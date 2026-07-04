@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v22'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v23'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -1084,9 +1084,31 @@ function drawCycleRing() {
 }
 
 /* ---- Today ---- */
+// A warm daily check-in line — makes opening the app a small ritual. Context-aware
+// and honest (never fake reassurance when something needs attention), and stable
+// within a day so it doesn't flicker on every render.
+function checkinGreeting() {
+  const h = new Date().getHours();
+  const kicker = h < 5 ? 'Late night' : h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : h < 21 ? 'Good evening' : 'Winding down';
+  const a = state.settings.onPatch ? assessPatch() : null;
+  const cd = patchCycleDay(todayISO());
+  // deterministic pick-of-the-day so it feels fresh but doesn't jump around
+  const seed = Number(todayISO().replaceAll('-', '')) % 997;
+  const pick = (arr) => arr[seed % arr.length];
+  let line;
+  if (a && a.level === 'risk') line = 'Let’s sort your patch out together — details below.';
+  else if (a && a.level === 'caution') line = 'One small patch task for you today.';
+  else if (cd !== null && isPatchFree(cd)) line = pick(['Patch-free week — a little rest for your skin.', 'Patch-free week — you’re still covered.', 'Rest week. Nothing to change today.']);
+  else if (state.settings.onPatch && cd !== null) line = pick(['Your patch is quietly doing its job.', 'All covered — nothing to do today.', 'Steady as ever. You’ve got this.', 'You showed up today. That’s the whole game.']);
+  else line = pick(['Here whenever you want to log something.', 'A gentle check-in — how are you today?']);
+  return { kicker, line };
+}
+
 function renderToday() {
   const tISO = todayISO();
   $('#todayDate').textContent = fmtDate(tISO, { weekday: 'long', month: 'long', day: 'numeric' });
+  const g = checkinGreeting();
+  $('#checkin').innerHTML = `<div class="checkin-kicker">${g.kicker} ✨</div><div class="checkin-line">${g.line}</div>`;
   drawCycleRing();
 
   // hero: one glance, one fact — a big number in the ring center
