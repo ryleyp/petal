@@ -1,19 +1,29 @@
 /* Petal — private period & patch tracker
- * All data is encrypted with the user's passcode (PBKDF2 + AES-GCM) and stored
+ * All data is encrypted with the user's passcode (PBKDF2-HMAC-SHA-256 + AES-GCM) and stored
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v23'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v29'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const b64 = {
-  enc: (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))),
+  enc: (buf) => {
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
+    return btoa(bin);
+  },
   dec: (str) => Uint8Array.from(atob(str), (c) => c.charCodeAt(0)),
 };
 
-const PBKDF2_ITER = 310000; // OWASP-aligned work factor; stored in vault for forward compat
+const PBKDF2_ITER = 600000; // current OWASP recommendation for PBKDF2-HMAC-SHA-256
+const MAX_UNLOCK_ATTEMPTS = 10;
+const LOCKOUT_MS = 5 * 60 * 1000;
+const LOCKOUT_KEY = 'petal.unlockLockout';
 
 async function deriveKey(passcode, salt, iterations = PBKDF2_ITER) {
   const base = await crypto.subtle.importKey('raw', enc.encode(passcode), 'PBKDF2', false, ['deriveKey']);
@@ -206,16 +216,40 @@ function showLock(setup) {
   setTimeout(() => $('#pass1').focus(), 100);
 }
 
+function lockoutState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(LOCKOUT_KEY) || '{}');
+    if (s.until && Date.now() < s.until) return s;
+  } catch {}
+  localStorage.removeItem(LOCKOUT_KEY);
+  return { count: 0, until: 0 };
+}
+function noteUnlockFailure() {
+  const s = lockoutState();
+  const count = (s.count || 0) + 1;
+  const until = count >= MAX_UNLOCK_ATTEMPTS ? Date.now() + LOCKOUT_MS : 0;
+  localStorage.setItem(LOCKOUT_KEY, JSON.stringify({ count, until }));
+  return { count, until };
+}
+function clearUnlockFailures() {
+  localStorage.removeItem(LOCKOUT_KEY);
+}
+
 $('#lockForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const p1 = $('#pass1').value.trim();
+  const p1 = $('#pass1').value;
   const err = $('#lockError');
   err.textContent = '';
+  const lockout = lockoutState();
+  if (lockout.until) {
+    const mins = Math.ceil((lockout.until - Date.now()) / 60000);
+    err.textContent = `Too many tries. Wait ${mins} minute${mins === 1 ? '' : 's'} and try again.`;
+    return;
+  }
 
   if (!hasVault()) {
     // setup
-    const p2 = $('#pass2').value.trim();
-    if (p1.length < 4) { err.textContent = 'Use at least 4 characters.'; return; }
+    const p2 = $('#pass2').value;
     if (p1 !== p2) { err.textContent = 'Passcodes do not match.'; return; }
     SALT = crypto.getRandomValues(new Uint8Array(16));
     ITER = PBKDF2_ITER;
@@ -234,10 +268,20 @@ $('#lockForm').addEventListener('submit', async (e) => {
     const key = await deriveKey(p1, SALT, ITER);
     state = await decryptState(key, vault.iv, vault.ct);
     KEY = key;
-    migrate();
+    const migrated = migrate();
+    clearUnlockFailures();
+    if (ITER < PBKDF2_ITER) {
+      ITER = PBKDF2_ITER;
+      KEY = await deriveKey(p1, SALT, ITER);
+      await saveState();
+    } else if (migrated) {
+      await saveState();
+    }
     openApp();
   } catch {
+    const failed = noteUnlockFailure();
     err.textContent = 'Incorrect passcode.';
+    if (failed.until) err.textContent += ' Too many tries; Petal is paused for 5 minutes.';
     $('#pass1').value = '';
   }
 });
@@ -250,11 +294,16 @@ $('#resetAll').addEventListener('click', () => {
 
 function migrate() {
   const d = defaultState();
+  let changed = false;
   state.settings = Object.assign({}, d.settings, state.settings || {});
   state.periods = state.periods || [];
   state.logs = state.logs || {};
+  for (const log of Object.values(state.logs)) {
+    if (log && log.flow && !log.bleedType) { log.bleedType = 'withdrawal'; changed = true; }
+  }
   state.patchActions = state.patchActions || [];
   state.appointments = state.appointments || [];
+  return changed;
 }
 
 function openApp() {
@@ -385,6 +434,27 @@ function cycleStats() {
     lengths,
     lastStart: ps.length ? ps[ps.length - 1].start : null,
   };
+}
+
+function bleedTypeStats() {
+  const out = { withdrawalDays: 0, breakthroughDays: 0, withdrawalEpisodes: 0, breakthroughEpisodes: 0 };
+  for (const [, log] of Object.entries(state.logs)) {
+    if (!log || !log.flow) continue;
+    if (log.bleedType === 'breakthrough') out.breakthroughDays++;
+    else out.withdrawalDays++;
+  }
+  for (const ep of bleedEpisodes()) {
+    if (isPeriodEpisode(ep)) out.withdrawalEpisodes++;
+    else out.breakthroughEpisodes++;
+  }
+  return out;
+}
+
+function hasWithdrawalBleed(from, to) {
+  return Object.keys(state.logs).some((d) => {
+    const log = state.logs[d];
+    return d >= from && d <= to && log && log.flow && log.bleedType !== 'breakthrough';
+  });
 }
 
 // Honest caption for how much data backs a prediction.
@@ -783,16 +853,17 @@ function pregnancyCheck() {
   const recentUnprotected = rc.hits.some((h) => daysBetween(h, tISO) <= 35);
 
   if (state.settings.onPatch && cycleAnchor()) {
-    // check the last few completed patch-free windows for a withdrawal bleed
+    // check recent patch-free windows for a withdrawal bleed
     const firstData = [...Object.keys(state.logs), ...((state.patchActions || []).map((a) => a.date))].sort()[0] || tISO;
     const windows = allCycleStarts()
-      .filter((s) => s >= firstData) // don't judge cycles from before you started logging
       .map((s) => ({ from: iso(addDays(parseISO(s), 20)), to: iso(addDays(parseISO(s), 29)), start: s }))
-      .filter((w) => w.to < tISO); // only fully evaluable windows
+      .filter((w) => w.to >= firstData) // keep windows that overlap your logged history
+      .filter((w) => w.from <= tISO)
+      .filter((w) => w.to < tISO || hasWithdrawalBleed(w.from, tISO)); // current window counts once bleeding appears
     const recent = windows.slice(-3).reverse();
     let missed = 0;
     for (const w of recent) {
-      const bled = Object.keys(state.logs).some((d) => d >= w.from && d <= w.to && state.logs[d].flow);
+      const bled = hasWithdrawalBleed(w.from, w.to);
       if (!bled) missed++; else break;
     }
     const riskThatCycle = recent[0] && riskWindows().some((rw) => rw.from <= iso(addDays(parseISO(recent[0].start), 28)) && rw.to >= recent[0].start);
@@ -865,8 +936,8 @@ function nextBleedPrediction() {
   // most recent removal point (this cycle's day 21, past or upcoming)
   const removal = cd >= 21 ? addDays(today(), -(cd - 21)) : addDays(today(), 21 - cd);
   const expected = addDays(removal, offset);
-  // if we're in the window and the bleed already started, nothing to predict
-  if (cd >= 21 && bleedDayNumber() > 0) return null;
+  // if this patch-free window already has a withdrawal bleed, nothing is overdue
+  if (cd >= 21 && hasWithdrawalBleed(iso(removal), todayISO())) return null;
   return { expected: iso(expected), removal: iso(removal), offset, personalized: !!bt,
     overdue: cd >= 21 && iso(expected) < todayISO() };
 }
@@ -1385,14 +1456,14 @@ $('#intimacyToggle').addEventListener('click', () => {
 });
 
 // quick actions
-$('.quick-actions').addEventListener('click', (e) => {
+$$('.quick-actions').forEach((row) => row.addEventListener('click', (e) => {
   const b = e.target.closest('.qa'); if (!b) return;
   const q = b.dataset.quick;
   if (q === 'period-start') startPeriod();
   if (q === 'patch-applied') applyPatchToday();
   if (q === 'patch-removed') removePatchToday();
   if (q === 'patch-detached') logPatchActionOn(todayISO(), 'detached');
-});
+}));
 
 function applyPatchToday() { logPatchActionOn(todayISO(), 'apply'); }
 function removePatchToday() { logPatchActionOn(todayISO(), 'remove'); }
@@ -1485,11 +1556,7 @@ function unlogPatchActionOn(ds, action) {
 }
 function patchActionsOn(ds) { return (state.patchActions || []).filter((a) => a.date === ds); }
 
-/* ---- Backfill: enter a past bleeding range in one go ---- */
-$('#backfillBtn').addEventListener('click', () => {
-  const from = prompt('Bleeding started (YYYY-MM-DD):');
-  if (!from) return;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) { toast('Use YYYY-MM-DD'); return; }
+function logBleedingRange(from) {
   const to = prompt('Last bleeding day (YYYY-MM-DD):', from);
   if (!to) return;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) { toast('End must be a valid date on/after the start'); return; }
@@ -1500,22 +1567,21 @@ $('#backfillBtn').addEventListener('click', () => {
   while (d <= e) {
     const ds = iso(d);
     const log = state.logs[ds] || { flow: '', bleedType: '', symptoms: [], tags: [], notes: '' };
-    if (!log.flow) { log.flow = 'medium'; state.logs[ds] = log; written.push(ds); }
+    if (!log.flow) { log.flow = 'medium'; log.bleedType = 'withdrawal'; state.logs[ds] = log; written.push(ds); }
     d = addDays(d, 1);
   }
-  saveState(); renderAll();
-  calCursor = new Date(parseISO(from).getFullYear(), parseISO(from).getMonth(), 1);
-  renderCalendar();
-  toastUndo(`Backfilled ${written.length} day${written.length === 1 ? '' : 's'} of bleeding`, () => {
+  if (!written.length) { toast('Those days already have flow logged'); return; }
+  saveState(); renderAll(); showDayDetail(from);
+  toastUndo(`Logged ${written.length} bleeding day${written.length === 1 ? '' : 's'}`, () => {
     for (const ds of written) {
       const log = state.logs[ds];
       if (!log) continue;
       log.flow = ''; log.bleedType = '';
       if (!log.symptoms?.length && !log.tags?.length && !log.notes) delete state.logs[ds];
     }
-    saveState(); renderAll(); toast('Backfill undone');
+    saveState(); renderAll(); showDayDetail(from); toast('Range undone');
   });
-});
+}
 
 /* ---- Calendar ---- */
 let calCursor = today();
@@ -1592,6 +1658,10 @@ function showDayDetail(ds) {
         <button data-val="breakthrough" class="${log.bleedType === 'breakthrough' ? 'on' : ''}">Breakthrough</button>
       </div>
     </div>
+    <div class="log-row"><label>Symptoms</label>
+      <div class="chips" id="dSymptoms">${allSymptoms().map((s) =>
+        `<button class="chip${(log.symptoms || []).includes(s) ? ' on' : ''}" data-sym="${escapeHtml(s)}" type="button">${escapeHtml(s)}</button>`).join('')}</div>
+    </div>
     <div class="log-row"><label>Private log</label>
       <div class="chips" id="dTags">${INTIMACY.map(([t, l]) =>
         `<button class="chip${(log.tags || []).includes(t) ? ' on' : ''}" data-tag="${t}" type="button">${l}</button>`).join('')}</div>
@@ -1604,6 +1674,7 @@ function showDayDetail(ds) {
       <button class="btn btn-ghost btn-ic" data-act="ps" style="flex:1">${hasStartMarker(ds)
         ? '✕ Unmark period start'
         : ic('drop', 'var(--period)', 'b-ic') + 'Period started this day'}</button>
+      <button class="btn btn-ghost btn-ic" data-act="range" style="flex:1">${ic('calendar', 'var(--period)', 'b-ic')}Log bleeding range</button>
     </div>
     <p class="muted small" style="margin:8px 0 0">A period's end is implied automatically — it's the
       last bleeding day you log before a gap. Use the mark above if day 1 was only spotting.</p>
@@ -1624,6 +1695,10 @@ function showDayDetail(ds) {
     const b = e.target.closest('button'); if (!b) return;
     box.querySelectorAll('#dBleedType button').forEach((x) => x.classList.toggle('on', x === b));
   });
+  box.querySelector('#dSymptoms').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    b.classList.toggle('on');
+  });
   box.querySelector('#dTags').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
     b.classList.toggle('on');
@@ -1632,10 +1707,10 @@ function showDayDetail(ds) {
     const flow = (box.querySelector('#dFlow button.on') || {}).dataset?.val ?? '';
     const bleedType = flow ? ((box.querySelector('#dBleedType button.on') || {}).dataset?.val ?? 'withdrawal') : '';
     const notes = box.querySelector('#dNotes').value.trim();
+    const symptoms = [...box.querySelectorAll('#dSymptoms .chip.on')].map((c) => c.dataset.sym);
     const tags = [...box.querySelectorAll('#dTags .chip.on')].map((c) => c.dataset.tag);
-    const prev = state.logs[ds] || {};
-    if (!flow && !notes && !tags.length && !(prev.symptoms && prev.symptoms.length)) delete state.logs[ds];
-    else state.logs[ds] = { flow, bleedType, symptoms: prev.symptoms || [], tags, notes };
+    if (!flow && !notes && !symptoms.length && !tags.length) delete state.logs[ds];
+    else state.logs[ds] = { flow, bleedType, symptoms, tags, notes };
     // periods are derived from consecutive bleeding days — no manual entry needed
     saveState(); renderAll(); showDayDetail(ds); toast('Day saved');
   });
@@ -1643,6 +1718,7 @@ function showDayDetail(ds) {
     if (hasStartMarker(ds)) unmarkStart(ds); else startPeriod(ds);
     showDayDetail(ds);
   });
+  box.querySelector('[data-act="range"]').addEventListener('click', () => logBleedingRange(ds));
   box.querySelector('[data-act^="apply"],[data-act^="unapply"]').addEventListener('click', (e) => {
     const act = e.currentTarget.dataset.act;
     if (act === 'apply') logPatchActionOn(ds, 'apply'); else unlogPatchActionOn(ds, 'apply');
@@ -1730,7 +1806,7 @@ function renderAppointments() {
   }).join('');
   box.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => {
     state.appointments = state.appointments.filter((a) => a.id !== b.dataset.del);
-    saveState(); renderAppointments(); renderCalendar();
+    saveState(); renderAll();
   }));
 }
 $('#addAppointment')?.addEventListener('click', () => {
@@ -1741,7 +1817,7 @@ $('#addAppointment')?.addEventListener('click', () => {
   const type = /refill|pharmacy|prescription/i.test(label) ? 'refill' : 'appointment';
   state.appointments = state.appointments || [];
   state.appointments.push({ id: crypto.randomUUID(), date, label: label.slice(0, 60), type });
-  saveState(); renderAppointments(); renderCalendar();
+  saveState(); renderAll();
   toast('Added');
 });
 
@@ -1786,12 +1862,15 @@ document.querySelector('.helper-btns').addEventListener('click', (e) => {
 /* ---- Insights ---- */
 function renderInsights() {
   const s = cycleStats();
+  const bts = bleedTypeStats();
   const box = $('#insights');
   box.innerHTML = `
     <div class="stat"><div class="big">${s.avgCycle}</div><div class="lbl">avg cycle (days)</div></div>
     <div class="stat"><div class="big">${s.avgPeriod || '—'}</div><div class="lbl">avg period (days)</div></div>
     <div class="stat"><div class="big">${s.count}</div><div class="lbl">cycles logged</div></div>
-    <div class="stat"><div class="big">${variability(s.lengths)}</div><div class="lbl">regularity</div></div>`;
+    <div class="stat"><div class="big">${variability(s.lengths)}</div><div class="lbl">regularity</div></div>
+    <div class="stat"><div class="big">${bts.withdrawalDays}</div><div class="lbl">${state.settings.onPatch ? 'withdrawal bleed' : 'period'} days</div></div>
+    <div class="stat"><div class="big">${bts.breakthroughDays}</div><div class="lbl">breakthrough days</div></div>`;
 
   // where you are in the cycle right now
   const pc = $('#phaseCard');
@@ -1922,12 +2001,12 @@ function renderInsights() {
     const clustered = trends.filter((t) => t.clusters);
     const cards = clustered.slice(0, 4).map((t) => {
       const verb = t.dominant === 'free' ? 'usually occur during' : (t.share >= 0.7 ? 'peak during' : 'tend to happen most in');
-      return `<div class="insight-line">${ic(t.dominant === 'free' ? 'moon' : 'sparkle', t.dominant === 'free' ? 'var(--patchfree)' : 'var(--patch)', 'i-ic')} <b>${t.sym}</b> ${verb} <b>${t.dominantLabel}</b> (${t[t.dominant]} of ${t.total} logs).</div>`;
+      return `<div class="insight-line">${ic(t.dominant === 'free' ? 'moon' : 'sparkle', t.dominant === 'free' ? 'var(--patchfree)' : 'var(--patch)', 'i-ic')} <b>${escapeHtml(t.sym)}</b> ${verb} <b>${t.dominantLabel}</b> (${t[t.dominant]} of ${t.total} logs).</div>`;
     }).join('');
     const bt = bleedTimingInsight();
     const btCard = bt ? `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} You typically start bleeding <b>${bt.avg} day${bt.avg === 1 ? '' : 's'}</b> after removing a patch (based on ${bt.n} cycles).</div>` : '';
     const rows = trends.slice(0, 8).map((t) =>
-      `<div class="h-item"><span>${t.sym}</span><span class="${t.clusters ? '' : 'muted'}">${t.clusters
+      `<div class="h-item"><span>${escapeHtml(t.sym)}</span><span class="${t.clusters ? '' : 'muted'}">${t.clusters
         ? `${ic('moon', 'var(--patchfree)', 'h-ic')} ${t.dominantLabel} (${t[t.dominant]} of ${t.total})`
         : `${t.total}×`}</span></div>`).join('');
     st.innerHTML = cards + btCard + `<div class="history" style="margin-top:${cards || btCard ? '10px' : '0'}">${rows}</div>` + (clustered.length
@@ -2034,16 +2113,17 @@ $('#saveSettings').addEventListener('click', () => {
 function clampNum(v, lo, hi, fb) { v = parseInt(v, 10); if (isNaN(v)) return fb; return Math.min(hi, Math.max(lo, v)); }
 
 $('#changePass').addEventListener('click', async () => {
-  const p1 = prompt('New passcode (min 4 chars):'); if (p1 === null) return;
-  if (p1.trim().length < 4) { alert('Too short.'); return; }
+  const p1 = prompt('New passcode:'); if (p1 === null) return;
   const p2 = prompt('Confirm new passcode:'); if (p2 === null) return;
   if (p1 !== p2) { alert('Passcodes do not match.'); return; }
   SALT = crypto.getRandomValues(new Uint8Array(16));
   ITER = PBKDF2_ITER;
-  KEY = await deriveKey(p1.trim(), SALT, ITER);
+  KEY = await deriveKey(p1, SALT, ITER);
   await saveState();
   toast('Passcode changed');
 });
+
+$('#checkUpdates').addEventListener('click', checkForAppUpdate);
 
 $('#exportData').addEventListener('click', () => {
   const blob = new Blob([localStorage.getItem(VAULT)], { type: 'application/json' });
@@ -2075,7 +2155,7 @@ function buildDoctorReport() {
   const hist = patchHistory().slice(0, 14);
   const rf = refillStatus();
   const rc = riskCrossref();
-  const row = (a, b) => `<tr><td>${a}</td><td>${b}</td></tr>`;
+  const row = (a, b) => `<tr><td>${escapeHtml(String(a ?? ''))}</td><td>${escapeHtml(String(b ?? ''))}</td></tr>`;
   const bleedRows = Object.entries(state.logs).filter(([, l]) => l.bleedType)
     .reduce((acc, [, l]) => { acc[l.bleedType] = (acc[l.bleedType] || 0) + 1; return acc; }, {});
   const siteRows = sortedActions().filter((a) => a.action === 'apply' && a.site).slice(-8).reverse();
@@ -2238,9 +2318,83 @@ function downloadBlob(blob, name) {
 }
 
 /* ============================================================ Boot ======== */
+let SW_REG = null;
+let updateReloadPending = false;
+
+function reloadForUpdateSoon() {
+  updateReloadPending = true;
+  setTimeout(() => { if (updateReloadPending) location.reload(); }, 1400);
+}
+
+async function preserveVaultBeforeUpdate() {
+  try {
+    if (KEY && state) await saveState();
+    await mirrorToFile();
+  } catch {}
+}
+
+async function applyWaitingUpdate(reg) {
+  if (updateReloadPending) return;
+  const worker = reg && (reg.waiting || reg.installing);
+  toast('Saving encrypted data…');
+  await preserveVaultBeforeUpdate();
+  toast('Update ready — refreshing');
+  updateReloadPending = true;
+  if (worker) {
+    try { worker.postMessage('skipWaiting'); } catch {}
+  }
+  reloadForUpdateSoon();
+}
+
+function watchInstallingUpdate(reg, worker) {
+  if (!worker) return;
+  worker.addEventListener('statechange', () => {
+    if (worker.state === 'installed' || worker.state === 'activated') applyWaitingUpdate(reg);
+  });
+}
+
+async function checkForAppUpdate() {
+  const btn = $('#checkUpdates');
+  if (isNative) { toast('Native app updates happen through the installed app'); return; }
+  if (!('serviceWorker' in navigator)) { toast('Updates load when you refresh'); return; }
+  try {
+    if (btn) btn.disabled = true;
+    toast('Checking for updates…');
+    const reg = SW_REG || await navigator.serviceWorker.getRegistration('./') || await navigator.serviceWorker.register('./sw.js');
+    SW_REG = reg;
+    let found = false;
+    const onUpdateFound = () => {
+      found = true;
+      watchInstallingUpdate(reg, reg.installing);
+    };
+    reg.addEventListener('updatefound', onUpdateFound, { once: true });
+    await reg.update();
+    if (reg.waiting) { applyWaitingUpdate(reg); return; }
+    if (reg.installing) {
+      found = true;
+      watchInstallingUpdate(reg, reg.installing);
+      toast('Update found — installing');
+      return;
+    }
+    setTimeout(() => {
+      if (!found && !reg.waiting && !reg.installing) toast('Petal is up to date');
+    }, 900);
+  } catch {
+    toast('Could not check for updates');
+  } finally {
+    setTimeout(() => { if (btn) btn.disabled = false; }, 1200);
+  }
+}
+
+navigator.serviceWorker?.addEventListener('controllerchange', () => {
+  if (!updateReloadPending) return;
+  updateReloadPending = false;
+  location.reload();
+});
+
 // Service worker only helps the browser/PWA build; native uses bundled assets.
 if ('serviceWorker' in navigator && !isNative) {
-  navigator.serviceWorker.register('./sw.js').catch(() => {});
+  navigator.serviceWorker.register('./sw.js').then((reg) => { SW_REG = reg; }).catch(() => {});
 }
 (async function boot() {
   await restoreFromFileIfNeeded();   // pull encrypted vault from iCloud on a fresh device

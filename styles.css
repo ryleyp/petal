@@ -33,7 +33,7 @@
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; height: 100%; background: #150f2e; }
 body {
   background:
     radial-gradient(85% 48% at 50% -10%, rgba(139,107,255,0.30), transparent 62%),
@@ -44,7 +44,7 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
   overscroll-behavior: none;
   overflow: hidden;            /* page itself never scrolls; only #views does */
-  position: fixed; width: 100%;
+  position: fixed; width: 100%; min-height: 100dvh;
 }
 /* Subtle celestial starfield — decorative only, sits behind everything */
 body::before {
@@ -128,7 +128,7 @@ main#views {
 
 .tabbar {
   flex: 0 0 auto; z-index: 20;
-  display: flex; background: rgba(27,20,48,0.95); backdrop-filter: blur(14px);
+  display: flex; background: #1b1430; backdrop-filter: blur(14px);
   border-top: 1px solid #392a63; padding-bottom: var(--safe-bot);
 }
 .tab {
