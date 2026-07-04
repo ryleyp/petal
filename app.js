@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v20'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v21'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -331,10 +331,24 @@ function bleedEpisodes() {
   return eps;
 }
 
+// Does a bleeding episode count as a period / withdrawal bleed (vs breakthrough)?
+// Honors explicit signals first, then flow, then patch-free-week context so that
+// even a light/spotting withdrawal bleed is captured.
+function isPeriodEpisode(e) {
+  // explicit: you marked "Period started" or tagged a day "Withdrawal"
+  if (e.days.some((x) => x.marker || x.bt === 'withdrawal')) return true;
+  // real (non-spotting) flow that you didn't tag as breakthrough
+  if (e.days.some((x) => x.flow && x.flow !== 'spotting' && x.bt !== 'breakthrough')) return true;
+  // on the patch, any (non-breakthrough) bleed landing in the patch-free week is
+  // a withdrawal bleed — even if it's only spotting
+  if (state.settings.onPatch && cycleAnchor() &&
+    e.days.some((x) => x.flow && x.bt !== 'breakthrough' && isPatchFree(patchCycleDay(x.d)))) return true;
+  return false;
+}
+
 function derivedPeriods() {
   return bleedEpisodes()
-    .filter((e) => e.days.some((x) => x.marker) ||
-      (e.days.some((x) => x.flow && x.flow !== 'spotting') && e.days.some((x) => x.flow && x.bt !== 'breakthrough')))
+    .filter(isPeriodEpisode)
     .map((e) => ({ start: e.start, end: e.end, ongoing: e.end === todayISO(), derived: true }));
 }
 

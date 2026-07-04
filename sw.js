@@ -1,6 +1,6 @@
 /* Petal service worker — offline cache only. No data ever leaves the device;
  * the SW caches the app shell so it works with no connection. */
-const CACHE = 'petal-v20';
+const CACHE = 'petal-v21';
 const ASSETS = [
   './',
   './index.html',
