@@ -66,20 +66,14 @@
         <div id="alerts"></div>
 
         <div class="quick-actions">
-          <button class="qa" data-quick="period-start">
+          <button class="qa qa-wide" data-quick="period-start">
             <svg class="qa-ic" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 3c3.4 4 6 7 6 10.1A6 6 0 0 1 6 13.1C6 10 8.6 7 12 3z" fill="#ff5d8f"/>
               <ellipse cx="9.6" cy="13.4" rx="1.8" ry="2.2" fill="#fff" opacity=".55"/>
             </svg>Period started
           </button>
-          <button class="qa" data-quick="patch-detached">
-            <svg class="qa-ic" viewBox="0 0 24 24" aria-hidden="true">
-              <g transform="rotate(-40 12 10)" opacity=".9">
-                <rect x="4" y="6.4" width="16" height="6.4" rx="3.2" fill="none" stroke="#b7a9d6" stroke-width="1.8" stroke-dasharray="3 2.2"/>
-              </g>
-              <path d="M12 15.5v4.5M9.6 17.8L12 20.2l2.4-2.4" fill="none" stroke="#ff9d2e" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>Patch fell off
-          </button>
+        </div>
+        <div class="quick-actions quick-actions-3">
           <button class="qa" data-quick="patch-applied">
             <svg class="qa-ic" viewBox="0 0 24 24" aria-hidden="true">
               <g transform="rotate(-40 12 12)">
@@ -90,13 +84,19 @@
                   <circle cx="9.4" cy="14.1" r="1"/><circle cx="14.6" cy="9.9" r="1"/>
                 </g>
               </g>
-            </svg>Applied patch
+            </svg>Applied
           </button>
           <button class="qa" data-quick="patch-removed">
             <svg class="qa-ic" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M15.6 3.2A9 9 0 1 0 21 14.6 7 7 0 0 1 15.6 3.2z" fill="#b9a6ef"/>
               <circle cx="17.5" cy="7" r="1.1" fill="#fff" opacity=".85"/>
-            </svg>Removed patch
+            </svg>Removed
+          </button>
+          <button class="qa" data-quick="patch-detached">
+            <svg class="qa-ic" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3c3.4 4 6 7 6 10.1A6 6 0 0 1 6 13.1C6 10 8.6 7 12 3z" fill="none" stroke="#b7a9d6" stroke-width="1.7" stroke-dasharray="2.4 2.2"/>
+              <path d="M8.4 17.6L12 21.2l3.6-3.6" fill="none" stroke="#ff9d2e" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>Fell off
           </button>
         </div>
 
@@ -122,11 +122,17 @@
           </div>
           <div class="log-row">
             <label>Symptoms</label>
-            <div class="chips" id="symptomChips"></div>
+            <div class="chips-wrap chips-collapsed" id="symptomWrap">
+              <div class="chips" id="symptomChips"></div>
+              <button type="button" class="chips-toggle" id="symptomToggle">Show all</button>
+            </div>
           </div>
           <div class="log-row">
             <label>Private log</label>
-            <div class="chips" id="intimacyChips"></div>
+            <div id="intimacyWrap">
+              <button type="button" class="chips-toggle" id="intimacyToggle" style="padding-top:0">Show — sex, EC &amp; tests</button>
+              <div class="chips hidden" id="intimacyChips"></div>
+            </div>
           </div>
           <div class="log-row">
             <label>Notes</label>
@@ -250,10 +256,6 @@
         <div class="card">
           <div class="card-head"><h2>Symptom patterns</h2></div>
           <div id="symptomTrends"></div>
-        </div>
-        <div class="card">
-          <div class="card-head"><h2>Pregnancy risk windows</h2></div>
-          <div id="riskWindows"></div>
         </div>
         <div class="card">
           <div class="card-head"><h2>Patch adherence</h2></div>

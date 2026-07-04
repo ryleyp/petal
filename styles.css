@@ -197,7 +197,11 @@ main#views {
 .alert .a-ic { width: 20px; height: 20px; flex: 0 0 auto; margin-top: 1px; }
 
 /* ---------- Quick actions ---------- */
-.quick-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+.quick-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+.quick-actions:last-of-type { margin-bottom: 14px; }
+.quick-actions-3 { grid-template-columns: 1fr 1fr 1fr; }
+.quick-actions-3 .qa { flex-direction: column; gap: 5px; font-size: 12.5px; padding: 12px 4px; }
+.quick-actions-3 .qa-ic { width: 20px; height: 20px; }
 .qa {
   background: linear-gradient(180deg, #332863, #2d2255);
   border: 1px solid rgba(255,255,255,0.06);
@@ -329,12 +333,61 @@ main#views {
 .site-grid .on-site { outline: 2px solid var(--accent2); }
 @keyframes sheet-up { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
 
+/* ---------- Collapsible chips & alert overflow ---------- */
+.chips-wrap { position: relative; }
+.chips-collapsed .chips { max-height: 88px; overflow: hidden; }
+.chips-collapsed::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 26px; height: 34px;
+  background: linear-gradient(transparent, #2b2050); pointer-events: none;
+}
+.chips-toggle {
+  background: none; border: none; color: var(--accent2); font-size: 13px; font-weight: 600;
+  padding: 6px 0 0; display: block;
+}
+.alert.overflow-hidden { display: none; }
+.alerts-more {
+  background: none; border: none; color: var(--muted); font-size: 13px; font-weight: 600;
+  padding: 4px 0 10px; display: block; width: 100%; text-align: center;
+}
+
+/* ---------- Larger iPhones (Plus / Pro Max, ≥415pt wide) ---------- */
+@media (min-width: 415px) {
+  main#views { padding-left: 20px; padding-right: 20px; }
+  .card, .status-card { padding: 18px; border-radius: 18px; }
+  .ring-wrap { max-width: 340px; }
+  .hero-big { font-size: 72px; }
+  .hero-cap { font-size: 15px; }
+  .quick-actions { gap: 10px; }
+  .qa { padding: 15px 8px; font-size: 15px; }
+  .quick-actions-3 .qa { font-size: 13.5px; padding: 13px 4px; }
+  .quick-actions-3 .qa-ic { width: 22px; height: 22px; }
+  .card-head h2 { font-size: 18px; }
+  .cal-grid { gap: 6px; }
+  .cal-cell { font-size: 14px; border-radius: 12px; }
+  .tab { font-size: 12px; padding: 9px 2px 7px; }
+  .seg button { font-size: 13px; padding: 9px 4px; }
+  .chip { font-size: 14px; padding: 8px 14px; }
+  .insight-line { font-size: 15px; }
+  .alert { font-size: 15px; }
+}
+
 /* ---------- Toast ---------- */
 .toast {
   position: fixed; bottom: calc(80px + var(--safe-bot)); left: 50%; transform: translateX(-50%);
   background: #000a; color: #fff; padding: 11px 18px; border-radius: 999px; font-size: 14px; z-index: 50;
   transition: opacity .25s; max-width: 90%;
 }
+/* ---------- Risk-window disclosure (inside "Could I be pregnant?") ---------- */
+.risk-windows-detail { margin-top: 6px; }
+.risk-windows-detail summary {
+  cursor: pointer; color: var(--muted); font-size: 13px; font-weight: 600; padding: 6px 2px;
+  list-style: none;
+}
+.risk-windows-detail summary::-webkit-details-marker { display: none; }
+.risk-windows-detail summary::before { content: '▸ '; }
+.risk-windows-detail[open] summary::before { content: '▾ '; }
+.risk-windows-detail .insight-line.small { padding: 8px 14px; margin-bottom: 4px; }
+
 .toast-undo {
   background: none; border: none; color: var(--accent); font-weight: 700; font-size: 14px;
   margin-left: 10px; padding: 2px 4px; text-transform: uppercase; letter-spacing: 0.5px;

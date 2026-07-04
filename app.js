@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v19'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v20'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -1133,6 +1133,9 @@ function renderToday() {
   $$('#symptomChips .chip').forEach((c) => c.classList.toggle('on', (log.symptoms || []).includes(c.dataset.sym)));
   $$('#intimacyChips .chip').forEach((c) => c.classList.toggle('on', (log.tags || []).includes(c.dataset.tag)));
   $('#todayNotes').value = log.notes || '';
+  // auto-expand sections that already hold today's data so nothing is invisible
+  if (log.symptoms?.length) { $('#symptomWrap').classList.remove('chips-collapsed'); $('#symptomToggle').textContent = 'Show less'; }
+  if (log.tags?.length) { $('#intimacyChips').classList.remove('hidden'); $('#intimacyToggle').textContent = 'Hide'; }
 }
 
 const LEVEL_META = {
@@ -1236,6 +1239,23 @@ function renderAlerts() {
 
   // gentle backup reminder so a year of data survives iOS storage eviction
   maybeBackupReminder(box);
+
+  // urgent alerts always sort to the top so the cap can never hide them
+  [...box.querySelectorAll('.alert.due')].reverse().forEach((el) => box.prepend(el));
+
+  // keep the Today screen calm: max 4 alerts visible, the rest one tap away
+  const all = [...box.querySelectorAll('.alert')];
+  if (all.length > 4) {
+    all.slice(4).forEach((el) => el.classList.add('overflow-hidden'));
+    const more = document.createElement('button');
+    more.className = 'alerts-more'; more.type = 'button';
+    more.textContent = `Show ${all.length - 4} more`;
+    more.addEventListener('click', () => {
+      all.forEach((el) => el.classList.remove('overflow-hidden'));
+      more.remove();
+    });
+    box.appendChild(more);
+  }
 }
 
 function maybeBackupReminder(box) {
@@ -1319,6 +1339,19 @@ function buildIntimacyChips() {
     box.appendChild(c);
   });
 }
+
+/* Collapsed-by-default sections keep the Today screen calm (and the private
+ * log away from shoulder-surfers) — one tap opens them. */
+$('#symptomToggle').addEventListener('click', () => {
+  const wrap = $('#symptomWrap');
+  const collapsed = wrap.classList.toggle('chips-collapsed');
+  $('#symptomToggle').textContent = collapsed ? 'Show all' : 'Show less';
+});
+$('#intimacyToggle').addEventListener('click', () => {
+  const chips = $('#intimacyChips');
+  const nowHidden = chips.classList.toggle('hidden');
+  $('#intimacyToggle').textContent = nowHidden ? 'Show — sex, EC & tests' : 'Hide';
+});
 
 // quick actions
 $('.quick-actions').addEventListener('click', (e) => {
@@ -1756,10 +1789,28 @@ function renderInsights() {
   const bh = bleedingHealth();
   const PREG_META = { none: ['check', 'var(--ok)'], info: ['clock', 'var(--patch)'], test: ['warn', 'var(--accent)'] };
   const [pIcon, pColor] = PREG_META[preg.level];
+  const rcForCard = state.settings.onPatch ? riskCrossref() : null;
+  const windowsDetail = rcForCard && rcForCard.windows.length
+    ? `<details class="risk-windows-detail"><summary>${rcForCard.windows.length} reduced-protection window${rcForCard.windows.length === 1 ? '' : 's'} from your logged patch timing</summary>` +
+      rcForCard.windows.map((w) => `<div class="insight-line small ${rcForCard.hits.some((h) => h >= w.from && h <= w.to) ? '' : 'muted'}">${fmtDate(w.from)} – ${fmtDate(w.to)}${rcForCard.hits.some((h) => h >= w.from && h <= w.to) ? ' — unprotected sex logged' : ''}</div>`).join('') +
+      `</details>`
+    : '';
   pg.innerHTML = preg.lines.map((l, i) =>
     `<div class="insight-line"${preg.level === 'test' && i === 0 ? ' style="border-left:3px solid var(--accent)"' : ''}>${i === 0 ? ic(pIcon, pColor, 'i-ic') + ' ' : ''}${l}</div>`).join('') +
+    windowsDetail +
     (preg.level === 'test' ? `<p class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</p>` : '') +
-    bh.map((l) => `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} ${l}</div>`).join('');
+    bh.map((l) => `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} ${l}</div>`).join('') +
+    (() => {
+      const t = bleedLengthTrend();
+      if (!t || t.dir === 'steady') return '';
+      return `<div class="insight-line">${ic('sparkle', 'var(--fertile)', 'i-ic')} Your bleeds have gotten <b>${t.dir}</b> — from about ${t.early}d to ${t.late}d over your last ${t.n} cycles.</div>`;
+    })() +
+    (() => {
+      const d = detachmentPatterns();
+      if (!d) return '';
+      if (!d.topSite) return `<div class="insight-line">${ic('warn', 'var(--muted)', 'i-ic')} You've logged ${d.total} patch fall-offs. Log the placement each time and Petal can tell you if one spot is the culprit.</div>`;
+      return `<div class="insight-line">${ic('warn', 'var(--patch)', 'i-ic')} ${d.topCount} of your ${d.sited} sited fall-offs were on the <b>${d.topSite.toLowerCase()}</b> — consider rotating away from that spot.</div>`;
+    })();
 
   // ovulation insight
   const ob = $('#ovulationInsight');
@@ -1852,27 +1903,6 @@ function renderInsights() {
     st.innerHTML = cards + btCard + `<div class="history" style="margin-top:${cards || btCard ? '10px' : '0'}">${rows}</div>` + (clustered.length
       ? `<p class="muted small" style="margin-top:8px">Patterns tied to the patch-free week are typical hormone-withdrawal effects. If they're rough, ask your clinician about options — some people shorten the patch-free interval under medical guidance.</p>`
       : '');
-  }
-
-  // pregnancy risk windows — factual, date-based, never a fabricated probability
-  const rw = $('#riskWindows');
-  if (!state.settings.onPatch) {
-    rw.innerHTML = '<p class="muted small">This only applies while tracking the patch — turn on "Currently using the patch" in Settings if that changes.</p>';
-  } else {
-    const rc = riskCrossref();
-    if (!rc.windows.length) {
-      rw.innerHTML = `<div class="insight-line">${ic('check', 'var(--ok)', 'i-ic')} No reduced-protection windows from your logged patch changes. Nice and steady.</div>`;
-    } else if (rc.hits.length) {
-      rw.innerHTML = `<div class="insight-line" style="border-left:3px solid var(--accent)">${ic('warn', 'var(--accent)', 'i-ic')}
-        <b>Unprotected sex was logged during a reduced-protection window.</b> If this was recent, emergency contraception
-        is most effective the sooner it's taken (within 3–5 days) — consider talking to a pharmacist or clinician promptly.
-        A missed period is also worth a pregnancy test.</div>` +
-        rc.windows.map((w) => `<div class="insight-line small ${rc.hits.some((h) => h >= w.from && h <= w.to) ? '' : 'muted'}">${fmtDate(w.from)} – ${fmtDate(w.to)}${rc.hits.some((h) => h >= w.from && h <= w.to) ? ' — flagged above' : ' — no unprotected sex logged'}</div>`).join('') +
-        `<p class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</p>`;
-    } else {
-      rw.innerHTML = `<div class="insight-line">${ic('clock', 'var(--patch)', 'i-ic')} You had ${rc.windows.length} reduced-protection window${rc.windows.length === 1 ? '' : 's'} from late/extended patch timing, but no unprotected sex was logged during ${rc.windows.length === 1 ? 'it' : 'them'}.</div>` +
-        rc.windows.map((w) => `<div class="insight-line small muted">${fmtDate(w.from)} – ${fmtDate(w.to)}</div>`).join('');
-    }
   }
 
   // adherence — the honest scoreboard of everything logged in the calendar
