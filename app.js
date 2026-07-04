@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v21'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v22'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -332,18 +332,12 @@ function bleedEpisodes() {
 }
 
 // Does a bleeding episode count as a period / withdrawal bleed (vs breakthrough)?
-// Honors explicit signals first, then flow, then patch-free-week context so that
-// even a light/spotting withdrawal bleed is captured.
+// Assumption: ANY logged bleed is a withdrawal bleed unless you explicitly tag it
+// breakthrough. So an episode counts unless every one of its bleeding days is
+// tagged breakthrough (a "Period started" marker always counts).
 function isPeriodEpisode(e) {
-  // explicit: you marked "Period started" or tagged a day "Withdrawal"
-  if (e.days.some((x) => x.marker || x.bt === 'withdrawal')) return true;
-  // real (non-spotting) flow that you didn't tag as breakthrough
-  if (e.days.some((x) => x.flow && x.flow !== 'spotting' && x.bt !== 'breakthrough')) return true;
-  // on the patch, any (non-breakthrough) bleed landing in the patch-free week is
-  // a withdrawal bleed — even if it's only spotting
-  if (state.settings.onPatch && cycleAnchor() &&
-    e.days.some((x) => x.flow && x.bt !== 'breakthrough' && isPatchFree(patchCycleDay(x.d)))) return true;
-  return false;
+  if (e.days.some((x) => x.marker)) return true;
+  return e.days.some((x) => x.flow && x.bt !== 'breakthrough');
 }
 
 function derivedPeriods() {
@@ -1143,7 +1137,8 @@ function renderToday() {
   const log = state.logs[tISO] || { flow: '', bleedType: '', symptoms: [], tags: [], notes: '' };
   $$('#flowSeg button').forEach((b) => b.classList.toggle('on', (b.dataset.val || '') === (log.flow || '')));
   $('#bleedTypeRow').classList.toggle('inactive', !log.flow);
-  $$('#bleedTypeSeg button').forEach((b) => b.classList.toggle('on', (b.dataset.val || '') === (log.bleedType || '')));
+  const btVal = log.bleedType === 'breakthrough' ? 'breakthrough' : 'withdrawal';
+  $$('#bleedTypeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.val === btVal));
   $$('#symptomChips .chip').forEach((c) => c.classList.toggle('on', (log.symptoms || []).includes(c.dataset.sym)));
   $$('#intimacyChips .chip').forEach((c) => c.classList.toggle('on', (log.tags || []).includes(c.dataset.tag)));
   $('#todayNotes').value = log.notes || '';
@@ -1284,7 +1279,7 @@ function maybeBackupReminder(box) {
 $('#saveToday').addEventListener('click', () => {
   const tISO = todayISO();
   const flow = ($('#flowSeg button.on') || {}).dataset?.val ?? '';
-  const bleedType = flow ? (($('#bleedTypeSeg button.on') || {}).dataset?.val ?? '') : '';
+  const bleedType = flow ? (($('#bleedTypeSeg button.on') || {}).dataset?.val ?? 'withdrawal') : '';
   const symptoms = $$('#symptomChips .chip.on').map((c) => c.dataset.sym);
   const tags = $$('#intimacyChips .chip.on').map((c) => c.dataset.tag);
   const notes = $('#todayNotes').value.trim();
@@ -1569,10 +1564,9 @@ function showDayDetail(ds) {
     <div class="log-row"><label>Flow strength</label>
       <div class="seg" id="dFlow">${flowSegHTML(log.flow || '')}</div>
     </div>
-    <div class="log-row${log.flow ? '' : ' inactive'}" id="dBleedTypeRow"><label>Bleeding type</label>
+    <div class="log-row${log.flow ? '' : ' inactive'}" id="dBleedTypeRow"><label>Bleeding type <span class="muted" style="font-weight:400">— counts as your period unless marked breakthrough</span></label>
       <div class="seg" id="dBleedType">
-        <button data-val="" class="${(log.bleedType || '') === '' ? 'on' : ''}">Not sure</button>
-        <button data-val="withdrawal" class="${log.bleedType === 'withdrawal' ? 'on' : ''}">Withdrawal</button>
+        <button data-val="withdrawal" class="${log.bleedType === 'breakthrough' ? '' : 'on'}">Withdrawal</button>
         <button data-val="breakthrough" class="${log.bleedType === 'breakthrough' ? 'on' : ''}">Breakthrough</button>
       </div>
     </div>
@@ -1614,7 +1608,7 @@ function showDayDetail(ds) {
   });
   box.querySelector('[data-act="save"]').addEventListener('click', () => {
     const flow = (box.querySelector('#dFlow button.on') || {}).dataset?.val ?? '';
-    const bleedType = flow ? ((box.querySelector('#dBleedType button.on') || {}).dataset?.val ?? '') : '';
+    const bleedType = flow ? ((box.querySelector('#dBleedType button.on') || {}).dataset?.val ?? 'withdrawal') : '';
     const notes = box.querySelector('#dNotes').value.trim();
     const tags = [...box.querySelectorAll('#dTags .chip.on')].map((c) => c.dataset.tag);
     const prev = state.logs[ds] || {};
