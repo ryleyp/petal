@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v32'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v33'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -196,7 +196,7 @@ const IC_PATHS = {
   sparkle: '<path d="M12 3l1.8 5.4L19 10l-5.2 1.7L12 17l-1.8-5.3L5 10l5.2-1.6z" fill="currentColor"/>',
 };
 function ic(name, color, cls = 'a-ic') {
-  return `<svg class="${cls}" viewBox="0 0 24 24" style="color:${color}" aria-hidden="true">${IC_PATHS[name]}</svg>`;
+  return `<svg class="${cls} ic-${name}" viewBox="0 0 24 24" style="color:${color}" aria-hidden="true">${IC_PATHS[name]}</svg>`;
 }
 
 /* ============================================================ Lock flow === */

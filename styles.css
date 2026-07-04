@@ -155,6 +155,9 @@ main#views {
 }
 .card-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
 .card-head h2 { font-size: 17px; margin: 0; }
+.card-head h2 .a-ic, .status-card h2 .a-ic {
+  width: 15px; height: 15px; flex: 0 0 auto; vertical-align: -2px;
+}
 .btn { border: none; border-radius: 12px; padding: 13px 16px; font-size: 15px; font-weight: 600; color: var(--text); transition: transform .12s ease; }
 .btn:active { transform: scale(0.97); }
 .qa, .chip, .seg button, .icon-btn, .cal-cell { transition: transform .12s ease, background .15s ease; }
@@ -314,6 +317,9 @@ main#views {
 .insight-line.flag-risk { border-left: 3px solid var(--accent); }
 /* small inline icons used across alerts / insights / history / buttons */
 .i-ic, .h-ic { width: 15px; height: 15px; vertical-align: -2.5px; }
+.insight-line .ic-check, .history .ic-check {
+  width: 11px; height: 11px; vertical-align: -1px;
+}
 .b-ic { width: 17px; height: 17px; vertical-align: -3px; margin-right: 6px; }
 .btn-ic { display: inline-flex; align-items: center; justify-content: center; }
 .d-tags { display: flex; flex-wrap: wrap; gap: 6px 12px; }
