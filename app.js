@@ -1075,7 +1075,7 @@ function pregnancyCheck() {
       bump('info');
       lines.push(`No bleed showed up in your last patch-free week. With consistent use this can be normal — bleeds on the patch are often light or occasionally absent. If it happens twice in a row, test.`);
     } else {
-      lines.push(`Your withdrawal bleeds are arriving when expected — <b>no pregnancy signals from your timing</b>.`);
+      lines.push(`Your withdrawal bleeds are arriving when expected — <b>no pregnancy signals from your timing</b>. Just what you want to see.`);
     }
     if (recentUnprotected && missed === 0) {
       bump('info');
@@ -1092,7 +1092,7 @@ function pregnancyCheck() {
       bump('info');
       lines.push(`You're ${late} day${late === 1 ? '' : 's'} past your average — a few days of drift is common (stress, travel, illness). Test if it reaches a week.`);
     } else {
-      lines.push(`Your timing looks on track — <b>no pregnancy signals</b>.`);
+      lines.push(`Your timing looks on track — <b>no pregnancy signals</b>. Just what you want to see.`);
     }
   }
 
@@ -1104,7 +1104,7 @@ function pregnancyCheck() {
     lines.unshift(`You logged a <b>faint-line test</b> (${fmtDate(faint.date)}) — a faint line usually still means positive. Retest in 2–3 days with first-morning urine, or ask a clinician for a blood test.`);
   } else if (level === 'test' && neg && daysBetween(neg.date, tISO) <= 7) {
     level = 'info';
-    lines.push(`You logged a <b>negative test</b> ${fmtDate(neg.date)} — reassuring. A test taken early can miss, so if there's still no bleed a week after that test, take another.`);
+    lines.push(`You logged a <b>negative test</b> ${fmtDate(neg.date)} — <b>good news</b>. A test taken early can miss, so if there's still no bleed a week after that test, take one more to be sure.`);
   }
   return { level, lines };
 }
@@ -2162,12 +2162,15 @@ function renderPregnancyTests() {
   const FOLLOW_UP = {
     positive: 'Talk with a clinician to confirm and discuss next steps.',
     faint: 'A faint line usually still means positive — retest in 2–3 days with first-morning urine.',
-    negative: 'If your bleed still hasn\'t arrived a week after this test, take another.',
+    negative: 'Good news — not pregnant. If your bleed still hasn\'t arrived a week after this test, take one more to be sure.',
     invalid: 'An invalid test tells you nothing either way — retest with a fresh one.',
   };
   const last = list[0];
   const [lIcon, lColor] = TEST_META[last.result];
-  sum.innerHTML = `<div class="insight-line"${last.result === 'positive' || last.result === 'faint' ? ' style="border-left:3px solid var(--accent)"' : ''}>${ic(lIcon, lColor, 'i-ic')} Last test: <b>${TEST_LABELS[last.result].toLowerCase()}</b> · ${fmtDate(last.date)}. ${FOLLOW_UP[last.result]}</div>` +
+  const lBorder = last.result === 'positive' || last.result === 'faint'
+    ? ' style="border-left:3px solid var(--accent)"'
+    : last.result === 'negative' ? ' style="border-left:3px solid var(--ok)"' : '';
+  sum.innerHTML = `<div class="insight-line"${lBorder}>${ic(lIcon, lColor, 'i-ic')} Last test: <b>${TEST_LABELS[last.result].toLowerCase()}</b> · ${fmtDate(last.date)}. ${FOLLOW_UP[last.result]}</div>` +
     (last.result === 'positive' || last.result === 'faint' ? `<p class="muted small" style="margin:6px 0 0">${GUIDE_DISCLAIMER}</p>` : '');
   box.innerHTML = list.slice(0, 20).map((t) => {
     const [icn, color] = TEST_META[t.result];
