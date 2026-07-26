@@ -293,6 +293,7 @@ main#views {
 .mark.act-apply { background: var(--patch); box-shadow: 0 0 0 1.5px var(--text); }
 .mark.act-remove { background: var(--patchfree); box-shadow: 0 0 0 1.5px var(--text); }
 .mark.appt { background: var(--ovul); }
+.mark.test { background: var(--text); box-shadow: 0 0 0 1.5px var(--accent); }
 .cal-cell.period-bg { background: rgba(255,93,143,0.22); }
 .cal-cell.patchfree-bg { background: rgba(138,123,191,0.18); }
 .legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 14px 0; font-size: 12px; color: var(--muted); align-items: center; }
@@ -302,6 +303,7 @@ main#views {
 .dot.act-apply { background: var(--patch); box-shadow: 0 0 0 1.5px var(--text); }
 .dot.act-remove { background: var(--patchfree); box-shadow: 0 0 0 1.5px var(--text); }
 .dot.patch { background: var(--patch); } .dot.patchfree { background: var(--patchfree); }
+.dot.test { background: var(--text); box-shadow: 0 0 0 1.5px var(--accent); }
 
 /* ---------- Schedule / insights / history ---------- */
 .schedule .ev, .history .h-item { display: flex; justify-content: space-between; gap: 10px; padding: 11px 0; border-bottom: 1px solid #3a2c66; font-size: 14px; }

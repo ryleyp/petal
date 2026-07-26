@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v33'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v34'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -95,6 +95,7 @@ function defaultState() {
     logs: {},                    // { 'YYYY-MM-DD': { flow, bleedType, symptoms:[], tags:[], notes } }
     patchActions: [],            // [{ date:'YYYY-MM-DD', action:'apply'|'remove'|'detached', site }]
     appointments: [],            // [{ id, date:'YYYY-MM-DD', label, type:'appointment'|'refill' }]
+    tests: [],                   // [{ id, date:'YYYY-MM-DD', result:'negative'|'faint'|'positive'|'invalid', note }]
   };
 }
 
@@ -310,6 +311,7 @@ function migrate() {
   }
   state.patchActions = state.patchActions || [];
   state.appointments = state.appointments || [];
+  state.tests = state.tests || [];
   return changed;
 }
 
@@ -977,6 +979,53 @@ function allCycleStarts() {
   return starts;
 }
 
+/* ---- Pregnancy test tracker ---- */
+const TEST_RESULTS = [
+  ['negative', 'Negative'],
+  ['faint', 'Faint line'],
+  ['positive', 'Positive'],
+  ['invalid', 'Invalid'],
+];
+const TEST_LABELS = Object.fromEntries(TEST_RESULTS);
+const TEST_META = {
+  negative: ['check', 'var(--ok)'],
+  faint: ['clock', 'var(--patch)'],
+  positive: ['warn', 'var(--accent)'],
+  invalid: ['warn', 'var(--muted)'],
+};
+
+/* One unified list: dedicated tracker entries plus the quick test-pos/test-neg
+ * chips from the daily private log (skipping days the tracker already covers). */
+function allPregnancyTests() {
+  const list = (state.tests || []).map((t) => ({ ...t, source: 'test' }));
+  for (const [d, log] of Object.entries(state.logs)) {
+    for (const [tagName, result] of [['test-pos', 'positive'], ['test-neg', 'negative']]) {
+      if ((log.tags || []).includes(tagName) && !list.some((t) => t.date === d && t.result === result)) {
+        list.push({ id: `log:${d}:${result}`, date: d, result, note: '', source: 'log' });
+      }
+    }
+  }
+  return list.sort((a, b) => a.date.localeCompare(b.date));
+}
+function latestTest(result) {
+  const l = allPregnancyTests().filter((t) => t.result === result);
+  return l.length ? l[l.length - 1] : null;
+}
+function testsOn(dateStr) {
+  return allPregnancyTests().filter((t) => t.date === dateStr);
+}
+/* Where in the cycle a test was taken — the context a clinician asks about. */
+function testContext(dateStr) {
+  if (state.settings.onPatch && cycleAnchor()) {
+    const cd = patchCycleDay(dateStr);
+    if (cd === null) return '';
+    return isPatchFree(cd) ? `patch-free day ${cd - 20}` : `patch day ${cd + 1}`;
+  }
+  const starts = sortedPeriods().map((p) => p.start).filter((s) => s <= dateStr);
+  if (!starts.length) return '';
+  return `cycle day ${daysBetween(starts[starts.length - 1], dateStr) + 1}`;
+}
+
 /* Honest pregnancy assessment from timing — dates and label guidance, never a
  * made-up probability. Levels: none | info | test. */
 function pregnancyCheck() {
@@ -986,9 +1035,15 @@ function pregnancyCheck() {
   const bump = (l) => { if (l === 'test' || (l === 'info' && level === 'none')) level = l; };
 
   // a recent logged positive test outranks everything
-  const posDay = Object.keys(state.logs).filter((d) => (state.logs[d].tags || []).includes('test-pos')).sort().pop();
-  if (posDay && daysBetween(posDay, tISO) <= 60) {
-    return { level: 'test', lines: [`You logged a <b>positive pregnancy test</b> (${fmtDate(posDay)}). Please talk to a clinician about next steps.`] };
+  const pos = latestTest('positive');
+  if (pos && daysBetween(pos.date, tISO) <= 60) {
+    const negAfter = latestTest('negative');
+    return { level: 'test', lines: [
+      `You logged a <b>positive pregnancy test</b> (${fmtDate(pos.date)}). Please talk to a clinician about next steps.`,
+      ...(negAfter && negAfter.date > pos.date
+        ? [`You've since logged a negative (${fmtDate(negAfter.date)}) — mixed results are still worth confirming with a clinician.`]
+        : []),
+    ] };
   }
   const rc = riskCrossref();
   const recentUnprotected = rc.hits.some((h) => daysBetween(h, tISO) <= 35);
@@ -1020,7 +1075,7 @@ function pregnancyCheck() {
       bump('info');
       lines.push(`No bleed showed up in your last patch-free week. With consistent use this can be normal — bleeds on the patch are often light or occasionally absent. If it happens twice in a row, test.`);
     } else {
-      lines.push(`Your withdrawal bleeds are arriving when expected — <b>no pregnancy signals from your timing</b>.`);
+      lines.push(`Your withdrawal bleeds are arriving when expected — <b>no pregnancy signals from your timing</b>. Just what you want to see.`);
     }
     if (recentUnprotected && missed === 0) {
       bump('info');
@@ -1037,8 +1092,19 @@ function pregnancyCheck() {
       bump('info');
       lines.push(`You're ${late} day${late === 1 ? '' : 's'} past your average — a few days of drift is common (stress, travel, illness). Test if it reaches a week.`);
     } else {
-      lines.push(`Your timing looks on track — <b>no pregnancy signals</b>.`);
+      lines.push(`Your timing looks on track — <b>no pregnancy signals</b>. Just what you want to see.`);
     }
+  }
+
+  // logged tests refine the timing signal
+  const faint = latestTest('faint');
+  const neg = latestTest('negative');
+  if (faint && daysBetween(faint.date, tISO) <= 10 && (!neg || neg.date <= faint.date)) {
+    bump('test');
+    lines.unshift(`You logged a <b>faint-line test</b> (${fmtDate(faint.date)}) — a faint line usually still means positive. Retest in 2–3 days with first-morning urine, or ask a clinician for a blood test.`);
+  } else if (level === 'test' && neg && daysBetween(neg.date, tISO) <= 7) {
+    level = 'info';
+    lines.push(`You logged a <b>negative test</b> ${fmtDate(neg.date)} — <b>good news</b>. A test taken early can miss, so if there's still no bleed a week after that test, take one more to be sure.`);
   }
   return { level, lines };
 }
@@ -1316,6 +1382,7 @@ function renderAll() {
   renderCalendar();
   renderPatch();
   renderInsights();
+  renderPregnancyTests();
   renderAppointments();
   renderDoctorQuestions();
   renderBackupHealth();
@@ -1869,6 +1936,7 @@ function renderCalendar() {
     if (info.patchfree) marks.push('patchfree');
     if (info.note && !info.period) marks.push('note');
     if ((state.appointments || []).some((a) => a.date === ds)) marks.push('appt');
+    if (testsOn(ds).length) marks.unshift('test');
     const dots = marks.slice(0, 4).map((c) => `<span class="mark ${c}"></span>`).join('');
     const cell = document.createElement('div');
     cell.className = cls.join(' ');
@@ -1900,6 +1968,7 @@ function showDayDetail(ds) {
   if (appliedHere) tags.push(tag('act-apply', 'Applied (logged)'));
   if (removedHere) tags.push(tag('act-remove', 'Removed (logged)'));
   if (detachedHere) tags.push(tag('act-remove', 'Fell off (logged)'));
+  for (const t of testsOn(ds)) tags.push(tag('test', `Test: ${TEST_LABELS[t.result].toLowerCase()}`));
   const box = $('#dayDetail'); box.classList.remove('hidden');
   box.innerHTML = `
     <div class="card-head"><h2>${fmtDate(ds, { weekday: 'long', month: 'long', day: 'numeric' })}</h2></div>
@@ -2080,6 +2149,73 @@ $('#addAppointment')?.addEventListener('click', () => {
   toast('Added');
 });
 
+/* ---- Pregnancy test log ---- */
+function renderPregnancyTests() {
+  const box = $('#testHistory'); if (!box) return;
+  const sum = $('#testSummary');
+  const list = allPregnancyTests().slice().reverse(); // newest first
+  if (!list.length) {
+    sum.innerHTML = '';
+    box.innerHTML = '<p class="muted small">No tests logged yet. Petal watches your bleed timing and suggests testing when it\'s warranted — log the result here either way, so the pregnancy check above can use it.</p>';
+    return;
+  }
+  const FOLLOW_UP = {
+    positive: 'Talk with a clinician to confirm and discuss next steps.',
+    faint: 'A faint line usually still means positive — retest in 2–3 days with first-morning urine.',
+    negative: 'Good news — not pregnant. If your bleed still hasn\'t arrived a week after this test, take one more to be sure.',
+    invalid: 'An invalid test tells you nothing either way — retest with a fresh one.',
+  };
+  const last = list[0];
+  const [lIcon, lColor] = TEST_META[last.result];
+  const lBorder = last.result === 'positive' || last.result === 'faint'
+    ? ' style="border-left:3px solid var(--accent)"'
+    : last.result === 'negative' ? ' style="border-left:3px solid var(--ok)"' : '';
+  sum.innerHTML = `<div class="insight-line"${lBorder}>${ic(lIcon, lColor, 'i-ic')} Last test: <b>${TEST_LABELS[last.result].toLowerCase()}</b> · ${fmtDate(last.date)}. ${FOLLOW_UP[last.result]}</div>` +
+    (last.result === 'positive' || last.result === 'faint' ? `<p class="muted small" style="margin:6px 0 0">${GUIDE_DISCLAIMER}</p>` : '');
+  box.innerHTML = list.slice(0, 20).map((t) => {
+    const [icn, color] = TEST_META[t.result];
+    const extras = [testContext(t.date), t.note ? escapeHtml(t.note) : '', t.source === 'log' ? 'from day log' : '']
+      .filter(Boolean).join(' · ');
+    return `<div class="h-item"><span>${ic(icn, color, 'h-ic')} <b>${TEST_LABELS[t.result]}</b> · ${fmtDate(t.date)}</span>
+      <span class="muted" style="display:flex;align-items:center;gap:8px">${extras}${t.source === 'test'
+        ? `<button class="link-btn" data-del-test="${t.id}" style="margin:0;font-size:12px">✕</button>` : ''}</span></div>`;
+  }).join('');
+  box.querySelectorAll('[data-del-test]').forEach((b) => b.addEventListener('click', () => {
+    state.tests = (state.tests || []).filter((t) => t.id !== b.dataset.delTest);
+    saveState(); renderAll(); toast('Test removed');
+  }));
+}
+$('#addTest')?.addEventListener('click', () => {
+  const nowOpen = !$('#testForm').classList.toggle('hidden');
+  $('#addTest').textContent = nowOpen ? 'Cancel' : '+ Log a pregnancy test';
+  if (nowOpen) {
+    $('#testDate').value = todayISO();
+    $('#testNote').value = '';
+    $$('#testResultSeg button').forEach((b) => b.classList.remove('on'));
+  }
+});
+$('#testResultSeg')?.addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  $$('#testResultSeg button').forEach((x) => x.classList.toggle('on', x === b));
+});
+$('#saveTest')?.addEventListener('click', () => {
+  const date = $('#testDate').value;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { toast('Pick the test date'); return; }
+  if (date > todayISO()) { toast('That date is in the future'); return; }
+  const result = ($('#testResultSeg button.on') || {}).dataset?.val;
+  if (!result) { toast('Pick a result'); return; }
+  const t = { id: crypto.randomUUID(), date, result, note: $('#testNote').value.trim().slice(0, 60) };
+  state.tests = state.tests || [];
+  state.tests.push(t);
+  $('#testForm').classList.add('hidden');
+  $('#addTest').textContent = '+ Log a pregnancy test';
+  saveState(); renderAll();
+  toastUndo('Test logged', () => {
+    state.tests = state.tests.filter((x) => x.id !== t.id);
+    saveState(); renderAll(); toast('Removed');
+  });
+});
+
 /* ---- Doctor-visit questions ---- */
 function renderDoctorQuestions() {
   const box = $('#doctorQuestions'); if (!box) return;
@@ -2203,6 +2339,7 @@ function renderInsights() {
   pg.innerHTML = preg.lines.map((l, i) =>
     `<div class="insight-line"${preg.level === 'test' && i === 0 ? ' style="border-left:3px solid var(--accent)"' : ''}>${i === 0 ? ic(pIcon, pColor, 'i-ic') + ' ' : ''}${l}</div>`).join('') +
     windowsDetail +
+    (preg.level !== 'none' ? `<div class="insight-line muted small">Taken a test? Log it in the “Pregnancy tests” card below — Petal factors the result into this check.</div>` : '') +
     (preg.level === 'test' ? `<p class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</p>` : '') +
     bh.map((l) => `<div class="insight-line">${ic('drop', 'var(--period)', 'i-ic')} ${l}</div>`).join('') +
     (() => {
@@ -2485,6 +2622,7 @@ function buildDoctorReport() {
     .reduce((acc, [, l]) => { acc[l.bleedType] = (acc[l.bleedType] || 0) + 1; return acc; }, {});
   const siteRows = sortedActions().filter((a) => a.action === 'apply' && a.site).slice(-8).reverse();
   const appts = (state.appointments || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+  const testRows = allPregnancyTests().slice(-10).reverse();
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Petal — cycle report</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#222;line-height:1.5}
 h1{font-size:22px}h2{font-size:16px;margin-top:26px;border-bottom:1px solid #ddd;padding-bottom:4px}
@@ -2521,6 +2659,9 @@ ${trends.slice(0, 10).map((t) => row(t.sym, `${t.total}× logged${t.clusters ? `
 </table>` : ''}
 ${rc && rc.windows.length ? `<h2>Reduced-protection windows (from logged patch timing)</h2><table>
 ${rc.windows.map((w) => row(`${fmtDate(w.from, { month: 'short', day: 'numeric' })} – ${fmtDate(w.to, { month: 'short', day: 'numeric' })}`, rc.hits.some((h) => h >= w.from && h <= w.to) ? 'Unprotected sex logged in this window' : 'No unprotected sex logged')).join('')}
+</table>` : ''}
+${testRows.length ? `<h2>Pregnancy tests (self-reported)</h2><table>
+${testRows.map((t) => row(`${fmtDate(t.date, { year: 'numeric', month: 'short', day: 'numeric' })}${testContext(t.date) ? ` (${testContext(t.date)})` : ''}`, `${TEST_LABELS[t.result]}${t.note ? ` — ${t.note}` : ''}`)).join('')}
 </table>` : ''}
 ${appts.length ? `<h2>Appointments &amp; refills</h2><table>
 ${appts.map((a) => row(fmtDate(a.date, { year: 'numeric', month: 'short', day: 'numeric' }), a.label)).join('')}
