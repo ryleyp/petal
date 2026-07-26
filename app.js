@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v34'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v35'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -1405,51 +1405,88 @@ const RING_DEFS = `<defs>
     <stop offset="0" stop-color="#ffa6c6"/><stop offset="1" stop-color="#ff5d8f"/></linearGradient>
   <linearGradient id="gGreen" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
     <stop offset="0" stop-color="#84e8cd"/><stop offset="1" stop-color="#43c6a8"/></linearGradient>
+  <linearGradient id="gLav" gradientUnits="userSpaceOnUse" x1="14" y1="8" x2="86" y2="92">
+    <stop offset="0" stop-color="#cdbef8"/><stop offset="1" stop-color="#8b6bff"/></linearGradient>
+  <radialGradient id="gCenterGlow">
+    <stop offset="0.55" stop-color="#8b6bff" stop-opacity="0"/>
+    <stop offset="1" stop-color="#8b6bff" stop-opacity="0.16"/></radialGradient>
   <filter id="ringDepth" x="-25%" y="-25%" width="150%" height="150%">
     <feDropShadow dx="0" dy="0.9" stdDeviation="0.9" flood-color="#000" flood-opacity="0.3"/></filter>
+  <filter id="arcGlow" x="-30%" y="-30%" width="160%" height="160%">
+    <feGaussianBlur stdDeviation="1.8"/></filter>
   <filter id="markerGlow" x="-150%" y="-150%" width="400%" height="400%">
     <feDropShadow dx="0" dy="0" stdDeviation="1.8" flood-color="#ff5d8f" flood-opacity="0.8"/></filter>
+  <filter id="ovulGlow" x="-150%" y="-150%" width="400%" height="400%">
+    <feDropShadow dx="0" dy="0" stdDeviation="1.6" flood-color="#4aa8ff" flood-opacity="0.85"/></filter>
 </defs>`;
 function drawCycleRing() {
   const el = $('#cycleRing'); if (!el) return;
-  const r = 45, w = 3.6, tISO = todayISO();
+  const r = 44, w = 5, tISO = todayISO();
   const TRACK = '#352a5c';
-  let total, cd, arcs = '', extra = '';
+  let total, cd, arcs = '', glow = '', extra = '';
   const patchMode = state.settings.onPatch && state.settings.patchStart;
 
   if (patchMode) {
     total = 28;
     cd = patchCycleDay(tISO); if (cd === null) cd = 0;
-    const step = 360 / total, g = 1.6;
-    const seg = (s, e, grad) => ringArc(r, s * step + g, e * step - g, `url(#${grad})`, w);
-    arcs = seg(0, 7, 'gAmber') + seg(7, 14, 'gAmber') + seg(14, 21, 'gAmber') + seg(21, 28, 'gPurple');
-    // softly dim the part of the cycle still ahead (a gentle progress feel)
-    if (cd > 0 && cd < total) extra = ringArc(r, cd * step, 359.9, '#16102c', w + 0.2, 0.3);
+    const step = 360 / total, g = 1.8;
+    const prog = (cd + 0.5) * step; // the lived part of the cycle, up to the today marker
+    for (const [s, e, grad] of [[0, 7, 'gAmber'], [7, 14, 'gAmber'], [14, 21, 'gAmber'], [21, 28, 'gPurple']]) {
+      const a0 = s * step + g, a1 = e * step - g;
+      const pa = Math.min(a1, Math.max(a0, prog));
+      if (pa < a1) arcs += ringArc(r, pa, a1, `url(#${grad})`, w, 0.26); // still ahead — dimmed
+      if (pa > a0) {                                                     // lived — full colour + soft halo
+        arcs += ringArc(r, a0, pa, `url(#${grad})`, w);
+        glow += ringArc(r, a0, pa, `url(#${grad})`, w + 1.6, 0.55);
+      }
+    }
   } else {
     const s = cycleStats();
     total = s.avgCycle || state.settings.cycleLen || 28; // data-driven average when available
     const step = 360 / total;
     const raw = s.lastStart ? daysBetween(s.lastStart, tISO) : null;
     cd = raw === null ? null : ((raw % total) + total) % total;
+    // lavender shimmer under the zones so elapsed progress reads at a glance
+    if (cd !== null && cd > 0) {
+      arcs += ringArc(r, 0.8, (cd + 0.5) * step, 'url(#gLav)', w, 0.35);
+      glow += ringArc(r, 0.8, (cd + 0.5) * step, 'url(#gLav)', w + 1.4, 0.4);
+    }
     const plen = s.avgPeriod || 5;
-    arcs = ringArc(r, 1, plen * step - 1, 'url(#gPink)', w);              // period
+    arcs += ringArc(r, 1, plen * step - 1, 'url(#gPink)', w);              // period
     const ovD = total - (state.settings.lutealLen || 14);
     arcs += ringArc(r, (ovD - 5) * step + 1, ovD * step - 1, 'url(#gGreen)', w); // fertile
     const [ox, oy] = polar(50, 50, r, (ovD + 0.5) * step);
-    extra += `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="2.8" fill="#2fa3ff"/>` +
-             `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="1.2" fill="#fff"/>`;
+    extra += `<g filter="url(#ovulGlow)"><circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="2.8" fill="#2fa3ff"/>` +
+             `<circle cx="${ox.toFixed(2)}" cy="${oy.toFixed(2)}" r="1.2" fill="#fff"/></g>`;
   }
 
-  // glowing today marker
+  // day ticks on an inner orbit — one dot per day, the lived ones shine
+  let ticks = '';
+  {
+    const stepT = 360 / total;
+    for (let i = 0; i < total; i++) {
+      const boundary = patchMode && i % 7 === 0; // patch-change days stand out a little
+      const [tx, ty] = polar(50, 50, 38, (i + 0.5) * stepT);
+      const lived = cd !== null && i <= cd;
+      ticks += `<circle cx="${tx.toFixed(2)}" cy="${ty.toFixed(2)}" r="${boundary ? 1.05 : 0.55}" fill="${lived ? '#cfc2f4' : '#463a76'}"/>`;
+    }
+  }
+
+  // glowing today marker with a gentle pulse (hidden when reduced motion is on)
   let marker = '';
   if (cd !== null) {
     const [mx, my] = polar(50, 50, r, (cd + 0.5) * (360 / total));
-    marker = `<g filter="url(#markerGlow)">` +
-      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="3.3" fill="#fff"/>` +
-      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="3.3" fill="none" stroke="#ff5d8f" stroke-width="1.4"/></g>`;
+    marker = `<circle class="today-pulse" cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="5.2" fill="none" stroke="#ff8bb0" stroke-width="1"/>` +
+      `<g filter="url(#markerGlow)">` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="3.4" fill="#fff"/>` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="3.4" fill="none" stroke="#ff5d8f" stroke-width="1.5"/>` +
+      `<circle cx="${mx.toFixed(2)}" cy="${my.toFixed(2)}" r="1.15" fill="#ff5d8f"/></g>`;
   }
-  el.innerHTML = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${RING_DEFS}
-    <circle cx="50" cy="50" r="${r}" stroke="${TRACK}" stroke-width="${w}" fill="none" opacity="0.55"/>
+  el.innerHTML = `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg" style="overflow:visible">${RING_DEFS}
+    <circle cx="50" cy="50" r="34" fill="url(#gCenterGlow)"/>
+    <circle cx="50" cy="50" r="${r}" stroke="${TRACK}" stroke-width="${w}" fill="none" opacity="0.5"/>
+    ${ticks}
+    <g filter="url(#arcGlow)" opacity="0.6">${glow}</g>
     <g filter="url(#ringDepth)">${arcs}</g>${extra}${marker}</svg>`;
 }
 
