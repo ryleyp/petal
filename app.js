@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v37'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v38'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -533,16 +533,61 @@ function patchCycleDay(dateStr) {
 const isPatchFree = (day) => day !== null && day >= 21 && day <= 27;
 const isPatchOn = (day) => day !== null && day >= 0 && day <= 20;
 
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+// The weekday your patch changes currently land on, from your real cycle anchor.
+function patchChangeWeekday() {
+  const a = cycleAnchor();
+  return a ? parseISO(a).getDay() : null;
+}
+
+/* Moving your patch change day. Petal only ever shifts the schedule EARLIER:
+ * shortening a patch-free week is always safe, while stretching one past 7 days
+ * is the single change that can let ovulation resume. So a move to any weekday
+ * is made by starting the next cycle up to 6 days sooner, never later. The move
+ * takes effect at your next cycle start — the patch you're wearing now is
+ * unaffected. */
+function changeDayPlan() {
+  const target = state.settings.patchDayOfWeek;
+  const anchor = cycleAnchor();
+  if (target == null || !anchor) return null;
+  const current = parseISO(anchor).getDay();
+  if (current === target) return { current, target, aligned: true };
+  const cd = patchCycleDay(todayISO());
+  if (cd === null) return null;
+  let nextStart = addDays(today(), PATCH_CYCLE - cd);        // day 0 of the next cycle
+  const shift = ((nextStart.getDay() - target) + 7) % 7;     // pull earlier by 1–6 days
+  let newStart = addDays(nextStart, -shift);
+  // if you're already deep enough into this cycle that pulling earlier would land
+  // in the past, keep the current change day one more cycle and move after that
+  let deferred = false;
+  if (iso(newStart) < todayISO()) {
+    nextStart = addDays(nextStart, PATCH_CYCLE);
+    newStart = addDays(nextStart, -shift);
+    deferred = true;
+  }
+  const removal = addDays(nextStart, -7);                    // day 21 of the cycle before the move
+  return {
+    current, target, aligned: false, shift, deferred,
+    from: iso(nextStart), to: iso(newStart),
+    removal: iso(removal),
+    removalPending: iso(removal) >= todayISO(),
+    freeDays: daysBetween(iso(removal), iso(newStart)),      // shortened patch-free week (1–6)
+  };
+}
+
 // upcoming patch events for `weeks` weeks (anchored to logged reality)
 function patchEvents(weeks = 12) {
   const p = cycleAnchor();
   if (!p) return [];
+  const plan = changeDayPlan();
   const start = parseISO(p);
   const horizon = addDays(today(), weeks * 7);
   const events = [];
   let cycle = 0;
   while (true) {
     const base = addDays(start, cycle * PATCH_CYCLE);
+    // once a change-day move takes effect, that cycle and every later one start earlier
+    const adj = (plan && !plan.aligned && iso(base) >= plan.from) ? -plan.shift : 0;
     const items = [
       { off: 0, type: 'apply', label: 'Apply new patch (week 1)' },
       { off: 7, type: 'change', label: 'Change patch (week 2)' },
@@ -550,7 +595,7 @@ function patchEvents(weeks = 12) {
       { off: 21, type: 'remove', label: 'Remove patch — patch-free week begins' },
     ];
     for (const it of items) {
-      const d = addDays(base, it.off);
+      const d = addDays(base, it.off + adj);
       if (d > horizon) { return events; }
       if (d >= addDays(today(), -1)) events.push({ date: iso(d), type: it.type, label: it.label });
     }
@@ -1002,6 +1047,13 @@ function isProtectedDay(d) {
   return !inRiskWindow(d);
 }
 
+// Emergency contraception logged on, or within 5 days after, a given day.
+function ecLoggedFor(dateStr) {
+  return Object.keys(state.logs)
+    .filter((d) => (state.logs[d].tags || []).includes('ec') && d >= dateStr && daysBetween(dateStr, d) <= 5)
+    .sort()[0] || null;
+}
+
 // Cross-reference risk windows against logged unprotected sex. Factual, date-based —
 // never a fabricated probability.
 function riskCrossref() {
@@ -1421,12 +1473,14 @@ function symptomTrends() {
 /* "You typically begin bleeding N days after removing your patch" — averaged
  * across cycles where a period start follows a logged removal within 10 days. */
 function bleedTimingInsight() {
-  const removals = sortedActions().filter((a) => a.action === 'remove');
+  // read removals off the coverage timeline, so this still works for people who
+  // take the patch off without logging it (the end of a patch-3 span is a removal)
+  const removals = patchSpans().filter((s) => s.endReason === 'remove').map((s) => s.toExclusive);
   if (!removals.length) return null;
   const deltas = [];
   for (const p of sortedPeriods()) {
-    const cand = removals.filter((r) => { const d = daysBetween(r.date, p.start); return d >= 0 && d <= 10; });
-    if (cand.length) deltas.push(daysBetween(cand[cand.length - 1].date, p.start));
+    const cand = removals.filter((r) => { const d = daysBetween(r, p.start); return d >= 0 && d <= 10; });
+    if (cand.length) deltas.push(daysBetween(cand[cand.length - 1], p.start));
   }
   if (deltas.length < 2) return null;
   return { avg: Math.round(deltas.reduce((a, b) => a + b, 0) / deltas.length), n: deltas.length };
@@ -1776,7 +1830,12 @@ function renderAlerts() {
       ${covered
         ? `Your patch timing shows a ${why ? RISK_CAUSE[why.cause] : 'recent gap'}, and the label advises 7 days of back-up after that before the patch is fully reliable again.`
         : `This came from a ${why ? RISK_CAUSE[why.cause] : 'gap in your logged patch timing'}.`}
-      Emergency contraception is most effective the sooner it's taken (within 3–5 days). A pharmacist can help today, no appointment needed.
+      ${(() => {
+        const ec = ecLoggedFor(recentHit);
+        return ec
+          ? `You logged <b>emergency contraception on ${fmtDate(ec)}</b> — that's the timely step covered here. EC only covers sex that already happened, so keep using back-up until your patch is reliable again.`
+          : `Emergency contraception is most effective the sooner it's taken (within 3–5 days). A pharmacist can help today, no appointment needed.`;
+      })()}
       <div class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</div></div></div>`);
   } else {
     // logged unprotected sex while fully covered — the common case, and worth saying plainly
@@ -2237,6 +2296,7 @@ function renderPatch() {
   $('#backupReminder').checked = state.settings.backupReminder !== false;
   $('#patchesLeft').value = state.settings.patchesLeft ?? '';
   $('#patchExpiry').value = state.settings.patchExpiry || '';
+  renderChangeDay();
   const box = $('#patchSchedule'); box.innerHTML = '';
   // be upfront when the schedule has re-anchored to logged reality
   const anchor = cycleAnchor();
@@ -2272,6 +2332,45 @@ $('#savePatch').addEventListener('click', () => {
   if (v) state.settings.onPatch = true;
   saveState(); hydrateSettings(); renderAll(); scheduleReminderTimer();
   toast('Patch schedule saved');
+});
+
+/* ---- Patch change day ---- */
+function renderChangeDay() {
+  const seg = $('#changeDaySeg'); if (!seg) return;
+  const note = $('#changeDayNote');
+  const currentWd = patchChangeWeekday();
+  const selected = state.settings.patchDayOfWeek ?? currentWd;
+  $$('#changeDaySeg button').forEach((b) => b.classList.toggle('on', Number(b.dataset.val) === selected));
+  if (currentWd === null) {
+    note.innerHTML = '<p class="muted small">Set your first-patch date above, then you can move your change day here.</p>';
+    return;
+  }
+  const plan = changeDayPlan();
+  if (!plan || plan.aligned) {
+    note.innerHTML = `<p class="muted small">${ic('check', 'var(--ok)', 'i-ic')} Your patch changes land on
+      <b>${WEEKDAYS[currentWd]}</b>. Pick another day and Petal will move the schedule at your next cycle start.</p>`;
+    return;
+  }
+  note.innerHTML = `
+    <div class="guidance ok" style="margin-top:8px">
+      <h3>Moving to ${WEEKDAYS[plan.target]}</h3>
+      <div>Carry on exactly as you are${plan.removalPending ? `, and remove your last patch on <b>${fmtDate(plan.removal)}</b> as normal` : ''}.
+      Then start that cycle <b>${plan.shift} day${plan.shift === 1 ? '' : 's'} early</b> on
+      <b>${fmtDate(plan.to)}</b> instead of ${fmtDate(plan.from)}. That makes one patch-free week
+      <b>${plan.freeDays} days</b> instead of 7 — shorter is the safe direction, so you stay protected
+      throughout and no back-up is needed.${plan.deferred
+        ? ` You're too far into this cycle to move it earlier without skipping days you've already passed, so the switch happens after your next patch-free week.`
+        : ''}</div>
+      <div class="disc">${GUIDE_DISCLAIMER}</div>
+    </div>
+    <p class="muted small">Petal never moves a change day later: stretching a patch-free week past 7 days is
+      the one change that can let ovulation resume. Every reminder and calendar export below already uses the new dates.</p>`;
+}
+$('#changeDaySeg')?.addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  $$('#changeDaySeg button').forEach((x) => x.classList.toggle('on', x === b));
+  state.settings.patchDayOfWeek = Number(b.dataset.val);
+  saveState(); renderAll(); scheduleReminderTimer();
 });
 
 /* ---- Appointments & refills ---- */
