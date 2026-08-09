@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v36'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v37'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -626,13 +626,14 @@ function siteStats() {
   const sited = applies.filter((a) => a.site);
   const counts = Object.fromEntries(SITES.map((s) => [s, 0]));
   for (const a of sited) counts[a.site] = (counts[a.site] || 0) + 1;
-  let sameRepeats = 0, last = null, recentRepeat = null;
+  // only genuinely consecutive applications can be a same-site repeat — an
+  // application with no placement in between means we simply don't know
+  let sameRepeats = 0, prev = null, recentRepeat = null;
   for (const a of applies) {
-    if (!a.site) continue;
-    if (last && last.site === a.site) { sameRepeats++; recentRepeat = a.site; }
-    last = a;
+    if (prev && prev.site && a.site && prev.site === a.site) { sameRepeats++; recentRepeat = a.site; }
+    prev = a;
   }
-  const lastSite = last ? last.site : null;
+  const lastSite = prev ? (prev.site || null) : null;
   const next = SITES
     .filter((s) => s !== lastSite)
     .sort((a, b) => (counts[a] - counts[b]) || a.localeCompare(b));
@@ -648,22 +649,24 @@ function siteStats() {
   };
 }
 
-function patchTimingStats() {
-  const acts = sortedActions();
-  const wear = [], offGaps = [], weeklyGaps = [];
-  let prev = null;
-  for (const a of acts) {
-    if (prev && prev.action === 'apply' && (a.action === 'apply' || a.action === 'remove' || a.action === 'detached')) {
-      wear.push(daysBetween(prev.date, a.date));
-      if (a.action === 'apply') weeklyGaps.push(daysBetween(prev.date, a.date));
-    }
-    if (prev && (prev.action === 'remove' || prev.action === 'detached') && a.action === 'apply') {
-      offGaps.push(daysBetween(prev.date, a.date));
-    }
-    prev = a;
+/* Timing stats read off the coverage timeline. `sinceISO` optionally limits the
+ * counts to recent history so an old one-off doesn't flag forever. */
+function patchTimingStats(sinceISO) {
+  const spans = patchSpans().filter((s) => !sinceISO || s.from >= sinceISO);
+  // wear time only from patches we actually saw come off — never from an inferred end
+  const wear = spans.filter((s) => !s.inferred).map((s) => daysBetween(s.from, s.toExclusive));
+  // a weekly change is two patches back to back with no hormone-free time between
+  const weeklyGaps = [];
+  for (let i = 0; i + 1 < spans.length; i++) {
+    if (spans[i + 1].from === spans[i].toExclusive) weeklyGaps.push(daysBetween(spans[i].from, spans[i + 1].from));
   }
+  // completed patch-free intervals: only deliberate removals count — a fall-off is
+  // an incident, and a patch left on past its grace is a late change, not an interval
+  const offGaps = hormoneFreeGaps()
+    .filter((g) => g.resumed && g.cause === 'remove' && (!sinceISO || g.from >= sinceISO))
+    .map((g) => g.days);
   const avg = (arr) => arr.length ? Math.round(arr.reduce((a, b) => a + b, 0) / arr.length * 10) / 10 : null;
-  const hist = patchHistory();
+  const hist = patchHistory().filter((e) => !sinceISO || e.date >= sinceISO);
   return {
     avgWear: avg(wear),
     wearCount: wear.length,
@@ -713,11 +716,16 @@ function patternFlags() {
   const ss = siteStats();
   if (ss.sameRepeats) flags.push({ level: 'caution', icon: 'warn', color: 'var(--patch)', text: `<b>${ss.sameRepeats}</b> consecutive same-site repeat${ss.sameRepeats === 1 ? '' : 's'} logged${ss.recentRepeat ? `, most recently ${ss.recentRepeat.toLowerCase()}` : ''}.` });
   if (ss.missing && ss.applies >= 2) flags.push({ level: 'info', icon: 'sparkle', color: 'var(--muted)', text: `<b>${ss.missing}</b> application${ss.missing === 1 ? '' : 's'} missing placement, so rotation and fall-off stats are incomplete.` });
-  const timing = patchTimingStats();
-  if (timing.maxPatchFree && timing.maxPatchFree > 7) flags.push({ level: 'risk', icon: 'warn', color: 'var(--accent)', text: `Longest patch-free interval logged: <b>${timing.maxPatchFree} days</b>, over the 7-day limit.` });
-  if (timing.weeklyOffDay >= 2) flags.push({ level: 'caution', icon: 'clock', color: 'var(--patch)', text: `<b>${timing.weeklyOffDay}</b> weekly changes landed off the 7-day rhythm. Your change day may need a reset.` });
-  const det = sortedActions().filter((x) => x.action === 'detached');
-  if (det.length >= 2) flags.push({ level: 'caution', icon: 'warn', color: 'var(--patch)', text: `<b>${det.length}</b> fall-offs logged. Placement, lotion, sweat, friction, and waistbands are worth watching.` });
+  // flags describe your current habits, so they age out — a one-off from a year
+  // ago shouldn't sit on the screen as a permanent red mark
+  const FLAG_WINDOW = 180;
+  const since = iso(addDays(today(), -FLAG_WINDOW));
+  const recently = 'in the last 6 months';
+  const timing = patchTimingStats(since);
+  if (timing.maxPatchFree && timing.maxPatchFree > 7) flags.push({ level: 'risk', icon: 'warn', color: 'var(--accent)', text: `Longest patch-free interval ${recently}: <b>${timing.maxPatchFree} days</b>, over the 7-day limit.` });
+  if (timing.weeklyOffDay >= 2) flags.push({ level: 'caution', icon: 'clock', color: 'var(--patch)', text: `<b>${timing.weeklyOffDay}</b> weekly changes ${recently} landed off the 7-day rhythm. Your change day may need a reset.` });
+  const det = sortedActions().filter((x) => x.action === 'detached' && x.date >= since);
+  if (det.length >= 2) flags.push({ level: 'caution', icon: 'warn', color: 'var(--patch)', text: `<b>${det.length}</b> fall-offs ${recently}. Placement, lotion, sweat, friction, and waistbands are worth watching.` });
   const recentBreakthrough = Object.entries(state.logs).filter(([d, l]) =>
     d >= iso(addDays(today(), -60)) && l.flow && l.bleedType === 'breakthrough').length;
   if (recentBreakthrough >= 4) flags.push({ level: 'info', icon: 'drop', color: 'var(--period)', text: `<b>${recentBreakthrough}</b> breakthrough bleeding days logged in the last 60 days.` });
@@ -828,43 +836,50 @@ function assessPatch() {
  * gaps between events (the 7-day rule) — never self-labeled. Returns newest first. */
 function patchHistory() {
   const acts = sortedActions();
+  const spans = patchSpans();
   const out = [];
-  let prev = null;
+  let prevApply = null;
   for (const a of acts) {
     // kind: how this event compares to the 7-day rhythm ('start' events aren't rated)
     let status = 'ok', note = '', kind = 'start', delta = null, hfGap = null;
     if (a.action === 'detached') {
       status = 'caution'; note = 'Patch fell off'; kind = 'incident';
     } else if (a.action === 'remove') {
-      const gap = prev && prev.action === 'apply' ? daysBetween(prev.date, a.date) : null;
+      const gap = prevApply ? daysBetween(prevApply.date, a.date) : null;
       if (gap === null) { note = 'Removed'; }
       else {
         delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
         if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Removed on time (7d worn)' : `Removed ${-delta}d early`; }
         else { status = 'ok'; note = `Removed ${delta}d late — still protected`; }
       }
-    } else { // apply
-      if (!prev) { status = 'ok'; note = 'Cycle start'; }
-      else if (prev.action === 'apply') { // weekly change
-        const gap = daysBetween(prev.date, a.date);
+    } else { // apply — rate it on the hormone-free time immediately before it, so a
+             // scheduled patch-free week is never mistaken for a very late change
+      const prevSpan = spans.filter((s) => s.toExclusive <= a.date).pop();
+      const free = prevSpan ? daysBetween(prevSpan.toExclusive, a.date) : null;
+      if (!prevApply || free === null) { status = 'ok'; note = 'Cycle start'; }
+      else if (free === 0) { // straight swap, no hormone-free time in between
+        const gap = daysBetween(prevApply.date, a.date);
         delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
         if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed ${-delta}d early`; }
         else if (gap < 9) { status = 'caution'; note = `Changed ${delta}d late (<48h) — still protected`; }
         else { status = 'risk'; note = `Changed ${delta}d late (≥48h) — protection reduced, new cycle from here`; }
-      } else if (prev.action === 'detached') { // re-apply after a fall-off
-        const gap = daysBetween(prev.date, a.date);
-        kind = 'incident'; delta = null;
-        if (gap <= 1) { status = 'ok'; note = 'Re-applied within 24h — still protected'; }
-        else { status = 'risk'; note = `Off ~${gap}d before a new patch — new cycle from here, 7-day backup advised`; hfGap = gap; }
-      } else { // apply after a remove = start of a new cycle
-        const gap = daysBetween(prev.date, a.date);
-        hfGap = gap; delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
-        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'New patch on time' : `New patch ${-delta}d early`; }
-        else { status = 'risk'; note = `Hormone-free ${gap}d (>7) — ovulation risk`; }
+      } else if (prevSpan.endReason === 'detached') { // re-apply after a fall-off
+        kind = 'incident'; hfGap = free;
+        if (free <= 1) { status = 'ok'; note = 'Re-applied within 24h — still protected'; }
+        else { status = 'risk'; note = `Off ~${free}d before a new patch — new cycle from here, 7-day backup advised`; }
+      } else if (prevSpan.endReason === 'expired') {
+        // the previous patch ran past its wear grace, so this change was ≥48h late
+        const gap = daysBetween(prevApply.date, a.date);
+        delta = gap - 7; kind = 'late'; hfGap = free; status = 'risk';
+        note = `Changed ${delta}d late (≥48h) — protection reduced, new cycle from here`;
+      } else { // a patch-free stretch then a new cycle
+        hfGap = free; delta = free - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
+        if (free <= 7) { status = 'ok'; note = free === 7 ? 'New patch on time' : `New patch ${-delta}d early`; }
+        else { status = 'risk'; note = `Hormone-free ${free}d (>7) — ovulation risk`; }
       }
     }
     out.push({ date: a.date, action: a.action, site: a.site || null, status, note, kind, delta, hfGap });
-    prev = a;
+    if (a.action === 'apply') prevApply = a;
   }
   return out.reverse();
 }
@@ -881,7 +896,10 @@ function patchHistory() {
  * MAX_WEAR is deliberately the label's grace limit, not a guess. */
 const MAX_WEAR = 8;
 
-function coverageSpans() {
+/* One span per applied patch, in order. `inferred` marks a span whose end we
+ * reasoned out rather than read from a log — those are fine for judging
+ * protection but must never be presented as measured wear time. */
+function patchSpans() {
   const acts = sortedActions();
   const tISO = todayISO();
   const spans = [];
@@ -893,6 +911,7 @@ function coverageSpans() {
     const close = rest.find((x) => (x.action === 'remove' || x.action === 'detached') && x.date > a.date);
     const nextApply = rest.find((x) => x.action === 'apply' && x.date > a.date);
     let endExclusive, endReason; // endExclusive = the first day with no hormone from this patch
+    let inferred = false;
     if (close && (!nextApply || close.date <= nextApply.date)) {
       endExclusive = close.date;
       endReason = close.action; // 'remove' (deliberate) | 'detached' (fell off)
@@ -903,13 +922,18 @@ function coverageSpans() {
       const replaced = nextApply && nextApply.date < worn;
       endExclusive = replaced ? nextApply.date : worn;
       endReason = replaced ? 'replaced' : (scheduledLast ? 'remove' : 'expired');
+      inferred = !replaced; // a following apply is real evidence the old patch came off
     }
     // a patch still on today is covering you today
-    if (endExclusive > tISO) { endExclusive = iso(addDays(today(), 1)); endReason = 'ongoing'; }
-    spans.push({ from: a.date, toExclusive: endExclusive, endReason });
+    if (endExclusive > tISO) { endExclusive = iso(addDays(today(), 1)); endReason = 'ongoing'; inferred = true; }
+    spans.push({ from: a.date, toExclusive: endExclusive, endReason, inferred });
   }
-  // merge back-to-back patches into one continuous covered stretch
-  spans.sort((x, y) => x.from.localeCompare(y.from));
+  return spans.sort((x, y) => x.from.localeCompare(y.from));
+}
+
+/* Patch spans merged into continuous covered stretches — the coverage timeline. */
+function coverageSpans() {
+  const spans = patchSpans();
   const merged = [];
   for (const s of spans) {
     const last = merged[merged.length - 1];
@@ -1243,8 +1267,10 @@ function detachmentPatterns() {
   const bySite = {};
   let sited = 0;
   for (const d of det) {
-    const apply = [...acts].reverse().find((a) => a.action === 'apply' && a.date <= d.date && a.site);
-    if (apply) { bySite[apply.site] = (bySite[apply.site] || 0) + 1; sited++; }
+    // the patch that fell off is the one applied most recently — never search past it
+    // for an older placement, or we blame a site that wasn't even being worn
+    const apply = [...acts].reverse().find((a) => a.action === 'apply' && a.date <= d.date);
+    if (apply && apply.site) { bySite[apply.site] = (bySite[apply.site] || 0) + 1; sited++; }
   }
   if (!sited) return { total: det.length, top: null };
   const [topSite, topCount] = Object.entries(bySite).sort((a, b) => b[1] - a[1])[0];
