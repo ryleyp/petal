@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v40'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v41'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -787,7 +787,18 @@ function patternFlags() {
  * These rules follow the common combined-patch guidance (e.g. Xulane/Evra). Brands differ
  * slightly (Twirla), so the app always tells you to confirm with your leaflet/pharmacist. */
 const GUIDE_DISCLAIMER =
-  'This follows standard combined-patch guidance. Brands differ — confirm with your patch leaflet or a pharmacist. Emergency contraception is most effective the sooner it is taken (within 3–5 days).';
+  'This follows the Zafemy (norelgestromin/ethinyl estradiol) labeling; other patches differ — confirm with your leaflet or a pharmacist. '
+  + 'Emergency contraception works best taken early: levonorgestrel (“Plan B”) is licensed to 72 hours, ulipristal (“ella”) to 120 hours. '
+  + 'Ulipristal interacts with patch hormones, so ask the pharmacist which one fits with staying on the patch.';
+
+/* Zafemy is approved only for a BMI under 30 — a limit that changes what "protected"
+ * means, so the app states it rather than quietly assuming label-appropriate use.
+ * Petal deliberately does not ask for or store weight or BMI. */
+const BMI_NOTE =
+  'Zafemy is approved for a <b>BMI under 30</b>, and its label lists a BMI of 30 or above as a contraindication — '
+  + 'partly for effectiveness and partly because the risk of blood clots is higher. It may also be less effective at or above '
+  + '<b>198 lb (90 kg)</b>. Petal doesn’t track your weight and can’t factor this in, so if it might apply to you, '
+  + 'it’s worth confirming with your clinician that the patch is still the right method.';
 
 // Hypothetical/explicit guidance for a single off-schedule event.
 // kind: 'change-late' | 'newcycle-late' | 'left-on-late' | 'detached'
@@ -1421,7 +1432,8 @@ function zafemyStickerInsights() {
   } else if (detaches.length) {
     lines.push(`${ic('warn', 'var(--muted)', 'i-ic')} <b>${detaches.length}</b> fall-off${detaches.length === 1 ? '' : 's'} logged. Add placement each time so Petal can spot where the sticker does not hold.`);
   }
-  lines.push(`${ic('check', 'var(--ok)', 'i-ic')} Zafemy basics: one sticker at a time, clean/dry skin, avoid breasts/cut/irritated skin, press firmly for 10 seconds, and check the edges daily.`);
+  lines.push(`${ic('check', 'var(--ok)', 'i-ic')} Zafemy basics: one sticker at a time, clean/dry skin, avoid breasts/cut/irritated skin, press firmly for 10 seconds, and check the edges daily. Approved areas are the upper outer arm, abdomen, buttock and back.`);
+  lines.push(`${ic('warn', 'var(--muted)', 'i-ic')} ${BMI_NOTE}`);
   return {
     stats: [
       ['Applied', applies.length],
@@ -1835,8 +1847,8 @@ function renderAlerts() {
         : ' — you had no patch hormone cover that day.'}</b>
       ${because}
       ${ec
-        ? `You logged <b>emergency contraception on ${fmtDate(ec)}</b> — that's the timely step covered here. EC only covers sex that already happened, so keep using back-up until the 7 days are up.`
-        : `Emergency contraception is most effective the sooner it's taken (within 3–5 days). A pharmacist can help today, no appointment needed.`}
+        ? `You logged <b>emergency contraception on ${fmtDate(ec)}</b> — that's the timely step covered here. EC only covers sex that already happened, so keep using back-up until the 7 days are up. If it was ulipristal (“ella”), it interacts with patch hormones — a pharmacist can advise on timing.`
+        : `Emergency contraception is most effective the sooner it's taken — levonorgestrel (“Plan B”) is licensed to 72 hours, ulipristal (“ella”) to 120. A pharmacist can help today with no appointment, and can say which one fits with staying on the patch.`}
       ${why && why.gapDays != null
         ? `<div class="muted small" style="margin-top:6px">If that gap isn't real — a patch you wore but didn't log, or a change recorded on the wrong day — correct it on the Calendar and this clears itself.</div>`
         : ''}
@@ -2301,6 +2313,7 @@ function renderPatch() {
   $('#patchesLeft').value = state.settings.patchesLeft ?? '';
   $('#patchExpiry').value = state.settings.patchExpiry || '';
   renderChangeDay();
+  const bmi = $('#bmiNote'); if (bmi) bmi.innerHTML = BMI_NOTE;
   const box = $('#patchSchedule'); box.innerHTML = '';
   // be upfront when the schedule has re-anchored to logged reality
   const anchor = cycleAnchor();
@@ -2893,7 +2906,8 @@ table{border-collapse:collapse;width:100%;font-size:14px}td{padding:5px 8px;bord
 <h1>Cycle &amp; contraception report</h1>
 <p class="meta">Generated ${new Date().toLocaleDateString()} from Petal (self-tracked data — accuracy depends on what was logged).</p>
 <h2>Summary</h2><table>
-${row('Contraception', state.settings.onPatch ? 'Combined hormonal patch (3 weeks on / 1 week patch-free)' : 'None recorded / natural cycle')}
+${row('Contraception', state.settings.onPatch ? 'Combined hormonal patch — Zafemy-type norelgestromin/ethinyl estradiol (3 weeks on / 1 week patch-free)' : 'None recorded / natural cycle')}
+${state.settings.onPatch ? row('Labeling note', 'Zafemy is indicated for BMI < 30 kg/m² and contraindicated at BMI ≥ 30; possible reduced effectiveness at ≥198 lb (90 kg). Petal does not record weight or BMI, so no assessment against this limit is included here.') : ''}
 ${row('Average cycle length', `${s.avgCycle} days (${s.lengths.length} measured cycle${s.lengths.length === 1 ? '' : 's'})`)}
 ${row('Average bleed length', s.avgPeriod ? `${s.avgPeriod} days` : 'not enough data')}
 ${row('Regularity', variability(s.lengths))}
