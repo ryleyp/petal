@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v38'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v39'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -496,7 +496,21 @@ const PATCH_CYCLE = 28;
 // All the dates at which a fresh 28-day cycle began (chronological): the manual
 // first-patch date, plus any apply that restarted the cycle (new patch after a
 // remove/detach, or a ≥48h-late weekly change).
-function cycleAnchors() {
+/* Nudge a derived anchor onto the weekday you've told Petal your changes really
+ * land on. Without this, one application logged a day late moves the anchor for
+ * good — every predicted date shifts with it, and nothing in the app undoes it. */
+function snapToChangeDay(dateStr) {
+  const target = state.settings.patchDayOfWeek;
+  if (target == null) return dateStr;
+  const d = parseISO(dateStr);
+  const delta = ((d.getDay() - target + 3 + 7) % 7) - 3;         // nearest occurrence, -3..+3
+  let snapped = addDays(d, -delta);
+  if (iso(snapped) > todayISO()) snapped = addDays(snapped, -7); // never anchor in the future
+  return iso(snapped);
+}
+// `raw` gives what the logs alone imply, before any change-day correction —
+// used to show you what Petal had inferred and by how much it was off.
+function cycleAnchors(raw) {
   const anchors = [];
   if (state.settings.patchStart) anchors.push(state.settings.patchStart);
   let prev = null;
@@ -511,7 +525,8 @@ function cycleAnchors() {
     }
     prev = a;
   }
-  return [...new Set(anchors)].sort((x, y) => x.localeCompare(y));
+  const list = raw ? anchors : anchors.map(snapToChangeDay);
+  return [...new Set(list)].sort((x, y) => x.localeCompare(y));
 }
 // The current cycle's start (for today / upcoming schedule).
 function cycleAnchor() { const a = cycleAnchors(); return a.length ? a[a.length - 1] : null; }
@@ -540,54 +555,35 @@ function patchChangeWeekday() {
   return a ? parseISO(a).getDay() : null;
 }
 
-/* Moving your patch change day. Petal only ever shifts the schedule EARLIER:
- * shortening a patch-free week is always safe, while stretching one past 7 days
- * is the single change that can let ovulation resume. So a move to any weekday
- * is made by starting the next cycle up to 6 days sooner, never later. The move
- * takes effect at your next cycle start — the patch you're wearing now is
- * unaffected. */
-function changeDayPlan() {
+// What the logs alone imply your change day is, before any correction.
+function derivedChangeWeekday() {
+  const raw = cycleAnchors(true);
+  return raw.length ? parseISO(raw[raw.length - 1]).getDay() : null;
+}
+
+/* What setting a change day does to the schedule: Petal lines its cycle up with
+ * the weekday you name, moving at most 3 days in whichever direction is nearer. */
+function changeDayCorrection() {
   const target = state.settings.patchDayOfWeek;
-  const anchor = cycleAnchor();
-  if (target == null || !anchor) return null;
-  const current = parseISO(anchor).getDay();
-  if (current === target) return { current, target, aligned: true };
-  const cd = patchCycleDay(todayISO());
-  if (cd === null) return null;
-  let nextStart = addDays(today(), PATCH_CYCLE - cd);        // day 0 of the next cycle
-  const shift = ((nextStart.getDay() - target) + 7) % 7;     // pull earlier by 1–6 days
-  let newStart = addDays(nextStart, -shift);
-  // if you're already deep enough into this cycle that pulling earlier would land
-  // in the past, keep the current change day one more cycle and move after that
-  let deferred = false;
-  if (iso(newStart) < todayISO()) {
-    nextStart = addDays(nextStart, PATCH_CYCLE);
-    newStart = addDays(nextStart, -shift);
-    deferred = true;
-  }
-  const removal = addDays(nextStart, -7);                    // day 21 of the cycle before the move
-  return {
-    current, target, aligned: false, shift, deferred,
-    from: iso(nextStart), to: iso(newStart),
-    removal: iso(removal),
-    removalPending: iso(removal) >= todayISO(),
-    freeDays: daysBetween(iso(removal), iso(newStart)),      // shortened patch-free week (1–6)
-  };
+  if (target == null) return null;
+  const raw = cycleAnchors(true);
+  if (!raw.length) return null;
+  const before = raw[raw.length - 1];
+  const after = cycleAnchor();
+  const moved = daysBetween(before, after); // negative = earlier, positive = later
+  return { target, derived: parseISO(before).getDay(), before, after, moved };
 }
 
 // upcoming patch events for `weeks` weeks (anchored to logged reality)
 function patchEvents(weeks = 12) {
   const p = cycleAnchor();
   if (!p) return [];
-  const plan = changeDayPlan();
   const start = parseISO(p);
   const horizon = addDays(today(), weeks * 7);
   const events = [];
   let cycle = 0;
   while (true) {
     const base = addDays(start, cycle * PATCH_CYCLE);
-    // once a change-day move takes effect, that cycle and every later one start earlier
-    const adj = (plan && !plan.aligned && iso(base) >= plan.from) ? -plan.shift : 0;
     const items = [
       { off: 0, type: 'apply', label: 'Apply new patch (week 1)' },
       { off: 7, type: 'change', label: 'Change patch (week 2)' },
@@ -595,7 +591,7 @@ function patchEvents(weeks = 12) {
       { off: 21, type: 'remove', label: 'Remove patch — patch-free week begins' },
     ];
     for (const it of items) {
-      const d = addDays(base, it.off + adj);
+      const d = addDays(base, it.off);
       if (d > horizon) { return events; }
       if (d >= addDays(today(), -1)) events.push({ date: iso(d), type: it.type, label: it.label });
     }
@@ -2345,26 +2341,27 @@ function renderChangeDay() {
     note.innerHTML = '<p class="muted small">Set your first-patch date above, then you can move your change day here.</p>';
     return;
   }
-  const plan = changeDayPlan();
-  if (!plan || plan.aligned) {
-    note.innerHTML = `<p class="muted small">${ic('check', 'var(--ok)', 'i-ic')} Your patch changes land on
-      <b>${WEEKDAYS[currentWd]}</b>. Pick another day and Petal will move the schedule at your next cycle start.</p>`;
+  const corr = changeDayCorrection();
+  const derived = derivedChangeWeekday();
+  if (!corr || corr.moved === 0) {
+    note.innerHTML = `<p class="muted small">${ic('check', 'var(--ok)', 'i-ic')} Your changes land on
+      <b>${WEEKDAYS[currentWd]}</b>${state.settings.patchDayOfWeek == null
+        ? ', going by what you\'ve logged. If that\'s not your real change day, set it here and every reminder, prediction and calendar export will line up with it.'
+        : ', matching what you set.'}</p>`;
     return;
   }
+  const dir = corr.moved < 0 ? 'earlier' : 'later';
   note.innerHTML = `
     <div class="guidance ok" style="margin-top:8px">
-      <h3>Moving to ${WEEKDAYS[plan.target]}</h3>
-      <div>Carry on exactly as you are${plan.removalPending ? `, and remove your last patch on <b>${fmtDate(plan.removal)}</b> as normal` : ''}.
-      Then start that cycle <b>${plan.shift} day${plan.shift === 1 ? '' : 's'} early</b> on
-      <b>${fmtDate(plan.to)}</b> instead of ${fmtDate(plan.from)}. That makes one patch-free week
-      <b>${plan.freeDays} days</b> instead of 7 — shorter is the safe direction, so you stay protected
-      throughout and no back-up is needed.${plan.deferred
-        ? ` You're too far into this cycle to move it earlier without skipping days you've already passed, so the switch happens after your next patch-free week.`
-        : ''}</div>
-      <div class="disc">${GUIDE_DISCLAIMER}</div>
+      <h3>Schedule lined up to ${WEEKDAYS[corr.target]}</h3>
+      <div>Your logs alone read as a <b>${WEEKDAYS[derived]}</b> change day, so Petal was ${Math.abs(corr.moved)}
+      day${Math.abs(corr.moved) === 1 ? '' : 's'} out. Its cycle now starts <b>${fmtDate(corr.after)}</b>
+      instead of ${fmtDate(corr.before)}, and reminders, the calendar, the ring and the .ics export all follow it.
+      Nothing about the patch you're wearing changes — this only corrects what Petal believes.</div>
     </div>
-    <p class="muted small">Petal never moves a change day later: stretching a patch-free week past 7 days is
-      the one change that can let ovulation resume. Every reminder and calendar export below already uses the new dates.</p>`;
+    <p class="muted small">${corr.moved < 0
+      ? `A single application logged a day late is enough to shift the whole schedule ${dir}; this pins it back.`
+      : `This moves Petal's schedule ${Math.abs(corr.moved)} day${Math.abs(corr.moved) === 1 ? '' : 's'} <b>later</b>, which is right if ${WEEKDAYS[corr.target]} is genuinely the day you change on. If instead you want to <b>switch</b> to a new day, do it by changing early rather than late — a patch-free week stretched past 7 days is the one thing that can let ovulation resume.`}</p>`;
 }
 $('#changeDaySeg')?.addEventListener('click', (e) => {
   const b = e.target.closest('button'); if (!b) return;
