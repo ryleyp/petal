@@ -3,7 +3,7 @@
  * only in this browser. Nothing is ever sent anywhere. */
 'use strict';
 
-const APP_VERSION = 'v39'; // shown in Settings so updates are easy to confirm
+const APP_VERSION = 'v40'; // shown in Settings so updates are easy to confirm
 
 /* ============================================================ Crypto ===== */
 const enc = new TextEncoder();
@@ -1026,7 +1026,11 @@ function riskWindows() {
     if (!firstRisk && g.days > 7) { firstRisk = iso(addDays(parseISO(g.from), 7)); cause = 'gap'; }
     if (!firstRisk) continue;
     const to = iso(addDays(g.resumed ? parseISO(g.resumed) : today(), 7));
-    if (to >= firstRisk) ws.push({ from: firstRisk, to, cause, open: !g.resumed });
+    // carry the gap that caused this window, so the app can show its working
+    // instead of asserting a lapse the user can't check or correct
+    if (to >= firstRisk) ws.push({ from: firstRisk, to, cause, open: !g.resumed,
+      gapFrom: g.from, gapLast: iso(addDays(parseISO(g.toExclusive), -1)),
+      gapDays: g.days, resumed: g.resumed });
   }
   return ws;
 }
@@ -1819,19 +1823,23 @@ function renderAlerts() {
     // being inside a window is not the same as having had no patch on — say which
     const covered = isCovered(recentHit);
     const why = rc.windows.find((w) => recentHit >= w.from && recentHit <= w.to);
+    const ec = ecLoggedFor(recentHit);
+    // spell out the earlier gap by date — the patch worn today is not the issue,
+    // and if the gap is a logging artifact this is what makes that visible
+    const because = why && why.gapDays != null
+      ? `That's not about the patch you're wearing now. It comes from an earlier gap in your logged timing: <b>${why.gapDays} day${why.gapDays === 1 ? '' : 's'} with no patch hormone, ${fmtDate(why.gapFrom)} – ${fmtDate(why.gapLast)}</b>${why.resumed ? ` (a patch went back on ${fmtDate(why.resumed)})` : ', with no patch logged as applied since'}. The label advises 7 days of back-up after a gap like that.`
+      : `It falls in a stretch your logged patch timing marks as reduced protection.`;
     box.insertAdjacentHTML('beforeend',
       `<div class="alert due">${ic('warn', 'var(--accent)')}<div><b>Unprotected sex logged ${fmtDate(recentHit)}${covered
-        ? ' — your patch was on, but it was still inside a back-up period.'
+        ? ' — your patch was on that day, inside a back-up period.'
         : ' — you had no patch hormone cover that day.'}</b>
-      ${covered
-        ? `Your patch timing shows a ${why ? RISK_CAUSE[why.cause] : 'recent gap'}, and the label advises 7 days of back-up after that before the patch is fully reliable again.`
-        : `This came from a ${why ? RISK_CAUSE[why.cause] : 'gap in your logged patch timing'}.`}
-      ${(() => {
-        const ec = ecLoggedFor(recentHit);
-        return ec
-          ? `You logged <b>emergency contraception on ${fmtDate(ec)}</b> — that's the timely step covered here. EC only covers sex that already happened, so keep using back-up until your patch is reliable again.`
-          : `Emergency contraception is most effective the sooner it's taken (within 3–5 days). A pharmacist can help today, no appointment needed.`;
-      })()}
+      ${because}
+      ${ec
+        ? `You logged <b>emergency contraception on ${fmtDate(ec)}</b> — that's the timely step covered here. EC only covers sex that already happened, so keep using back-up until the 7 days are up.`
+        : `Emergency contraception is most effective the sooner it's taken (within 3–5 days). A pharmacist can help today, no appointment needed.`}
+      ${why && why.gapDays != null
+        ? `<div class="muted small" style="margin-top:6px">If that gap isn't real — a patch you wore but didn't log, or a change recorded on the wrong day — correct it on the Calendar and this clears itself.</div>`
+        : ''}
       <div class="muted small" style="margin-top:6px">${GUIDE_DISCLAIMER}</div></div></div>`);
   } else {
     // logged unprotected sex while fully covered — the common case, and worth saying plainly
@@ -2584,8 +2592,9 @@ function renderInsights() {
   const rcForCard = state.settings.onPatch ? riskCrossref() : null;
   const windowsDetail = rcForCard && rcForCard.windows.length
     ? `<details class="risk-windows-detail"><summary>${rcForCard.windows.length} reduced-protection window${rcForCard.windows.length === 1 ? '' : 's'} from your logged patch timing</summary>` +
-      rcForCard.windows.map((w) => `<div class="insight-line small ${rcForCard.hits.some((h) => h >= w.from && h <= w.to) ? '' : 'muted'}">${fmtDate(w.from)} – ${fmtDate(w.to)} — ${RISK_CAUSE[w.cause] || 'gap in logged patch timing'}${w.open ? ', still open (no patch logged as applied since)' : ''}${rcForCard.hits.some((h) => h >= w.from && h <= w.to) ? '; unprotected sex logged' : ''}</div>`).join('') +
-      `<p class="muted small">Scheduled patch-free weeks are not listed here — those are the method working normally, not a gap.</p>` +
+      rcForCard.windows.map((w) => `<div class="insight-line small ${rcForCard.hits.some((h) => h >= w.from && h <= w.to) ? '' : 'muted'}">${fmtDate(w.from)} – ${fmtDate(w.to)} — ${RISK_CAUSE[w.cause] || 'gap in logged patch timing'}${w.gapDays != null
+        ? `<br><span class="muted">from ${w.gapDays} hormone-free day${w.gapDays === 1 ? '' : 's'}, ${fmtDate(w.gapFrom)} – ${fmtDate(w.gapLast)}${w.resumed ? `; patch back on ${fmtDate(w.resumed)}` : ''}</span>` : ''}${w.open ? ', still open (no patch logged as applied since)' : ''}${rcForCard.hits.some((h) => h >= w.from && h <= w.to) ? '; unprotected sex logged' : ''}</div>`).join('') +
+      `<p class="muted small">Scheduled patch-free weeks are not listed here — those are the method working normally, not a gap. Each window is read from your logged applications and removals, so a missing log shows up as a gap; correcting the day on the Calendar clears it.</p>` +
       `</details>`
     : '';
   pg.innerHTML = preg.lines.map((l, i) =>
