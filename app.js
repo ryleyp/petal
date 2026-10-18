@@ -576,29 +576,45 @@ function changeDayCorrection() {
 }
 
 // upcoming patch events for `weeks` weeks (anchored to logged reality)
+// A patch-free week you have planned to skip (settings.skipPlan holds the removal
+// date) becomes a new-patch day, and the next block starts from that day.
+const plannedSkips = () => state.settings.skipPlan || [];
 function patchEvents(weeks = 12) {
   const p = cycleAnchor();
   if (!p) return [];
-  const start = parseISO(p);
   const horizon = addDays(today(), weeks * 7);
+  const planned = new Set(plannedSkips());
   const events = [];
-  let cycle = 0;
-  while (true) {
-    const base = addDays(start, cycle * PATCH_CYCLE);
+  let base = parseISO(p);
+  let afterSkip = false;
+  for (let cycle = 0; cycle <= weeks; cycle++) {
+    const removeDate = iso(addDays(base, 21));
+    const skipping = planned.has(removeDate);
     const items = [
-      { off: 0, type: 'apply', label: 'Apply new patch (week 1)' },
+      afterSkip
+        ? { off: 0, type: 'apply', label: 'Apply new patch (planned: skip patch-free week)', skip: true }
+        : { off: 0, type: 'apply', label: 'Apply new patch (week 1)' },
       { off: 7, type: 'change', label: 'Change patch (week 2)' },
       { off: 14, type: 'change', label: 'Change patch (week 3)' },
-      { off: 21, type: 'remove', label: 'Remove patch — patch-free week begins' },
+      // when skipping, the next block's first application stands in for the removal
+      ...(skipping ? [] : [{ off: 21, type: 'remove', label: 'Remove patch — patch-free week begins', skippable: true }]),
     ];
+    afterSkip = skipping;
     for (const it of items) {
       const d = addDays(base, it.off);
       if (d > horizon) { return events; }
-      if (d >= addDays(today(), -1)) events.push({ date: iso(d), type: it.type, label: it.label });
+      if (d >= addDays(today(), -1)) events.push({ date: iso(d), type: it.type, label: it.label, skip: it.skip, skippable: it.skippable });
     }
-    cycle++;
-    if (cycle > weeks) return events; // safety
+    base = addDays(base, skipping ? 21 : PATCH_CYCLE);
   }
+  return events;
+}
+// Plan (or un-plan) skipping the patch-free week that would start on `removeDate`.
+function togglePlannedSkip(removeDate) {
+  const plan = new Set(plannedSkips());
+  if (plan.has(removeDate)) plan.delete(removeDate); else plan.add(removeDate);
+  state.settings.skipPlan = [...plan].sort();
+  saveState(); renderAll();
 }
 
 /* When does the current patch supply run out? Every upcoming application
@@ -667,6 +683,8 @@ const SKIP_SOURCES = [
 ];
 const SKIP_FACTS = [
   'Zafemy’s labeled schedule is three weekly patches followed by one patch-free week, so skipping the break is outside the label. Check with your prescriber before you do it, especially because Zafemy has its own BMI limit.',
+  'You do not have to skip every time. Many people skip occasionally and plan the patch-free week around travel or events. When you want a withdrawal bleed, take a planned patch-free week after at least 21 consecutive days of correctly used patches, and keep it to 7 days or fewer.',
+  'Skipping uses a fourth patch in a 28-day stretch instead of three. Ask your prescriber for a prescription that covers extended use so you do not run out before your next refill. Petal counts planned skips when it estimates your patch supply.',
   'A Cochrane review of 12 trials found pregnancy rates and safety were similar for continuous or extended use and the standard 28-day cycle. In 11 of the 12 trials, bleeding patterns were equal or better with extended use.',
   'UK clinical guidance (FSRH) lists continuous use of patches, with no patch-free week, as an accepted off-label option.',
   'The CDC notes that seven days of continuous use are needed to reliably prevent ovulation, and that stretching the hormone-free time is a risky point for any combined method. If you ever take a short break from continuous use because of bleeding, the CDC advises 3 to 4 days at most, not in the first 21 days, and not more than once a month.',
@@ -1842,7 +1860,7 @@ function renderAlerts() {
   // option to skip the patch-free week, offered around the 3rd patch's removal day
   if (canSkipOffWeek(tISO)) {
     box.insertAdjacentHTML('beforeend',
-      `<div class="alert">${ic('moon', 'var(--patchfree)')}<div><b>Want to skip your patch-free week?</b> Instead of removing this patch, apply a new one today and keep going. You will not have a withdrawal bleed that week.
+      `<div class="alert">${ic('moon', 'var(--patchfree)')}<div><b>${plannedSkips().some((d) => Math.abs(daysBetween(d, tISO)) <= 3) ? 'You planned to skip your patch-free week.' : 'Want to skip your patch-free week?'}</b> Instead of removing this patch, apply a new one today and keep going. You will not have a withdrawal bleed that week.
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
           <button class="btn btn-ghost btn-ic" data-skip-off>${ic('bandage', 'var(--patch)', 'b-ic')}Skip the break</button>
         </div>
@@ -2098,6 +2116,8 @@ function logPatchActionOn(ds, action, opts) {
   }
   const before = (state.patchActions || []).length;
   recordPatchAction(action, ds, opts && opts.skip ? { skip: true } : null);
+  // the plan has been carried out (or overtaken by a day or two): drop it
+  if (opts && opts.skip) state.settings.skipPlan = plannedSkips().filter((d) => Math.abs(daysBetween(d, ds)) > 3);
   const isNew = state.patchActions.length > before;
   // each newly-logged application uses one patch from the box
   if (action === 'apply' && isNew && state.settings.patchesLeft != null) {
@@ -2407,9 +2427,13 @@ function renderPatch() {
     if (dleft === 0) { when = 'Today'; cls = 'ev-due'; }
     else if (dleft === 1) { when = 'Tomorrow'; cls = 'ev-soon'; }
     else if (dleft > 1) when = `in ${dleft} days`;
+    const plan = e.skippable ? `<button class="link-btn" data-plan-skip="${e.date}">Plan to skip this break</button>`
+      : (e.skip ? `<button class="link-btn" data-plan-skip="${e.date}">Undo planned skip</button>` : '');
     box.insertAdjacentHTML('beforeend',
-      `<div class="ev"><span>${e.label}</span><span class="${cls}">${when}</span></div>`);
+      `<div class="ev"><span>${e.label}${plan ? `<br>${plan}` : ''}</span><span class="${cls}">${when}</span></div>`);
   });
+  box.querySelectorAll('[data-plan-skip]').forEach((b) => b.addEventListener('click',
+    () => togglePlannedSkip(b.dataset.planSkip)));
 }
 $('#savePatch').addEventListener('click', () => {
   const v = $('#patchStart').value;
