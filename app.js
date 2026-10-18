@@ -517,6 +517,7 @@ function cycleAnchors(raw) {
   for (const a of sortedActions()) {
     if (a.action === 'apply') {
       if (!anchors.length) anchors.push(a.date);
+      else if (a.skip) anchors.push(a.date); // patch-free week skipped: a new block starts here
       else if (prev && prev.action === 'remove') anchors.push(a.date);
       // a fallen-off patch re-applied within 24h keeps the original change day;
       // off ≥24h means a fresh 4-week cycle starts here
@@ -626,13 +627,55 @@ function patchNumberFor(dateStr) {
 function sortedActions() {
   return [...(state.patchActions || [])].sort((a, b) => a.date.localeCompare(b.date));
 }
-function recordPatchAction(action, dateStr) {
+function recordPatchAction(action, dateStr, extra) {
   dateStr = dateStr || todayISO();
   state.patchActions = state.patchActions || [];
   // de-dupe same action same day
   if (!state.patchActions.some((a) => a.date === dateStr && a.action === action)) {
-    state.patchActions.push({ date: dateStr, action });
+    state.patchActions.push({ date: dateStr, action, ...(extra || {}) });
   }
+}
+
+/* ---- Skipping the patch-free week (continuous use) ----
+ * Instead of removing the 3rd patch, you put a new one straight on. It is logged as
+ * an ordinary application flagged `skip`, which starts a fresh 3-on / 1-off block
+ * from that day, so the schedule carries on from the new change day. Only offered
+ * when the 3rd patch is the one on and no removal has been logged, because after a
+ * removal a new patch is just a normal (possibly late) start. */
+function canSkipOffWeek(dateStr) {
+  if (!state.settings.onPatch || !cycleAnchor()) return false;
+  const cd = patchCycleDay(dateStr);
+  if (cd === null || cd < 20 || cd > 22) return false; // 3rd patch's removal day, give or take the 48h grace
+  const acts = sortedActions().filter((a) => a.date <= dateStr);
+  const lastApply = [...acts].reverse().find((a) => a.action === 'apply' && a.date < dateStr);
+  if (!lastApply) return false;
+  if (acts.some((a) => a.date > lastApply.date && (a.action === 'remove' || a.action === 'detached'))) return false;
+  return !acts.some((a) => a.date === dateStr && a.action === 'apply');
+}
+// Did the cycle that began on `startISO` have its patch-free week skipped?
+const skippedBreakIn = (startISO) => sortedActions().some((a) => a.skip && a.date > startISO
+  && daysBetween(startISO, a.date) >= 18 && daysBetween(startISO, a.date) <= 31);
+
+/* What the evidence says about going without the break. Wording sticks to what the
+ * sources state; the sources are linked so it can be checked. */
+const SKIP_SOURCES = [
+  ['Cochrane review: continuous or extended vs. cyclic combined hormonal contraceptives', 'https://www.cochrane.org/CD004695'],
+  ['CDC U.S. Selected Practice Recommendations, 2024: combined hormonal contraceptives', 'https://www.cdc.gov/contraception/hcp/usspr/combined-hormonal-contraceptives.html'],
+  ['CDC U.S. SPR, 2024: managing bleeding irregularities', 'https://www.cdc.gov/contraception/hcp/usspr/bleeding-irregularities-contraception.html'],
+  ['FSRH combined hormonal contraception guideline, regimens summary (NHS Dumfries and Galloway)', 'https://www.rightdecisions.scot.nhs.uk/dgrefhelp-nhs-dumfries-galloway/sexual-health/contraception/combined-hormonal-contraception/regimens-and-patient-information'],
+  ['Zafemy prescribing information', 'https://prescriberpoint.com/therapies/zafemy-fbbd12d'],
+];
+const SKIP_FACTS = [
+  'Zafemy’s labeled schedule is three weekly patches followed by one patch-free week, so skipping the break is outside the label. Check with your prescriber before you do it, especially because Zafemy has its own BMI limit.',
+  'A Cochrane review of 12 trials found pregnancy rates and safety were similar for continuous or extended use and the standard 28-day cycle. In 11 of the 12 trials, bleeding patterns were equal or better with extended use.',
+  'UK clinical guidance (FSRH) lists continuous use of patches, with no patch-free week, as an accepted off-label option.',
+  'The CDC notes that seven days of continuous use are needed to reliably prevent ovulation, and that stretching the hormone-free time is a risky point for any combined method. If you ever take a short break from continuous use because of bleeding, the CDC advises 3 to 4 days at most, not in the first 21 days, and not more than once a month.',
+  'You will not have a withdrawal bleed in the week you skip. Spotting is common, and a missing bleed is not a sign of pregnancy on its own. Petal will not count this week as a missed bleed. If you have symptoms or any doubt, take a pregnancy test.',
+];
+function skipFactsHTML() {
+  return `<ul class="skip-facts">${SKIP_FACTS.map((f) => `<li>${f}</li>`).join('')}</ul>`
+    + `<p class="muted small">Sources:</p><ul class="skip-sources">${SKIP_SOURCES.map(([t, u]) =>
+      `<li><a href="${u}" target="_blank" rel="noopener noreferrer">${t}</a></li>`).join('')}</ul>`;
 }
 
 function currentPatchWear() {
@@ -859,7 +902,7 @@ function assessPatch() {
     if (num === 3) {
       // 3rd patch: due to be REMOVED at +7 (start patch-free week)
       if (daysOn < 7) return { level: 'ok', title: `Patch 3 of 3 on`, message: `Remove in ${7 - daysOn} day${7 - daysOn === 1 ? '' : 's'} to begin your patch-free week.` };
-      if (daysOn === 7) return { level: 'caution', title: 'Time to start your patch-free week', message: 'Remove the patch today.' };
+      if (daysOn === 7) return { level: 'caution', title: 'Time to start your patch-free week', message: 'Remove the patch today, or skip the break by applying a new patch instead (the option is on your Today screen).' };
       return Object.assign(lateGuidance('left-on-late'), { num, daysOn });
     }
     // patch 1 or 2: due to be CHANGED at +7
@@ -912,7 +955,8 @@ function patchHistory() {
       else if (free === 0) { // straight swap, no hormone-free time in between
         const gap = daysBetween(prevApply.date, a.date);
         delta = gap - 7; kind = delta === 0 ? 'ontime' : (delta < 0 ? 'early' : 'late');
-        if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed ${-delta}d early`; }
+        if (a.skip) { status = 'ok'; note = 'Patch-free week skipped (continuous use)'; }
+        else if (gap <= 7) { status = 'ok'; note = gap === 7 ? 'Changed on time' : `Changed ${-delta}d early`; }
         else if (gap < 9) { status = 'caution'; note = `Changed ${delta}d late (<48h) — still protected`; }
         else { status = 'risk'; note = `Changed ${delta}d late (≥48h) — protection reduced, new cycle from here`; }
       } else if (prevSpan.endReason === 'detached') { // re-apply after a fall-off
@@ -1214,6 +1258,7 @@ function pregnancyCheck() {
       .map((s) => ({ from: iso(addDays(parseISO(s), 20)), to: iso(addDays(parseISO(s), 29)), start: s }))
       .filter((w) => w.to >= firstData) // keep windows that overlap your logged history
       .filter((w) => w.from <= tISO)
+      .filter((w) => !skippedBreakIn(w.start)) // a skipped patch-free week has no bleed to expect
       .filter((w) => w.to < tISO || hasWithdrawalBleed(w.from, tISO)); // current window counts once bleeding appears
     const recent = windows.slice(-3).reverse();
     let missed = 0;
@@ -1235,6 +1280,10 @@ function pregnancyCheck() {
       lines.push(`No bleed showed up in your last patch-free week. With consistent use this can be normal — bleeds on the patch are often light or occasionally absent. If it happens twice in a row, test.`);
     } else {
       lines.push(`Your withdrawal bleeds are arriving when expected — <b>no pregnancy signals from your timing</b>. Just what you want to see.`);
+    }
+    const lastSkip = sortedActions().filter((x) => x.skip).pop();
+    if (lastSkip && daysBetween(lastSkip.date, tISO) <= 35) {
+      lines.push(`You skipped your patch-free week on ${fmtDate(lastSkip.date)}, so no withdrawal bleed was expected then. Petal leaves that week out of the bleed check. Test if you have symptoms or any doubt.`);
     }
     if (recentUnprotected && missed === 0) {
       bump('info');
@@ -1790,6 +1839,18 @@ function renderAlerts() {
       `<div class="alert">${ic('clock', 'var(--patch)')}<div><b>Tomorrow:</b> ${tomEv.label}.</div></div>`);
   }
 
+  // option to skip the patch-free week, offered around the 3rd patch's removal day
+  if (canSkipOffWeek(tISO)) {
+    box.insertAdjacentHTML('beforeend',
+      `<div class="alert">${ic('moon', 'var(--patchfree)')}<div><b>Want to skip your patch-free week?</b> Instead of removing this patch, apply a new one today and keep going. You will not have a withdrawal bleed that week.
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <button class="btn btn-ghost btn-ic" data-skip-off>${ic('bandage', 'var(--patch)', 'b-ic')}Skip the break</button>
+        </div>
+        <details style="margin-top:8px"><summary class="muted small">What the research says</summary>${skipFactsHTML()}</details>
+      </div></div>`);
+    box.querySelector('[data-skip-off]')?.addEventListener('click', () => skipOffWeek(tISO));
+  }
+
   // late period (natural cycle only)
   const np = predictNextPeriod();
   if (np && !state.settings.onPatch) {
@@ -2018,17 +2079,25 @@ $$('.quick-actions').forEach((row) => row.addEventListener('click', (e) => {
 }));
 
 function applyPatchToday() { logPatchActionOn(todayISO(), 'apply'); }
+// Confirm first: it changes the schedule and goes beyond the labeled regimen.
+function skipOffWeek(ds) {
+  if (!canSkipOffWeek(ds)) { toast('Skipping the break is only offered around your 3rd patch’s removal day'); return; }
+  if (!confirm('Skip your patch-free week and keep going on the patch?\n\n'
+    + 'This logs a new patch today and starts a fresh 3-week block from today. '
+    + 'It goes beyond the Zafemy label, so it is worth confirming with your prescriber. Tap OK to continue.')) return;
+  logPatchActionOn(ds, 'apply', { skip: true });
+}
 function removePatchToday() { logPatchActionOn(todayISO(), 'remove'); }
 
 // Log a patch apply/remove for any date (today or retroactive).
-function logPatchActionOn(ds, action) {
+function logPatchActionOn(ds, action, opts) {
   // If there's no schedule yet, the first applied patch anchors the cycle.
   if (action === 'apply' && !state.settings.patchStart) {
     state.settings.patchStart = ds;
     state.settings.onPatch = true;
   }
   const before = (state.patchActions || []).length;
-  recordPatchAction(action, ds);
+  recordPatchAction(action, ds, opts && opts.skip ? { skip: true } : null);
   const isNew = state.patchActions.length > before;
   // each newly-logged application uses one patch from the box
   if (action === 'apply' && isNew && state.settings.patchesLeft != null) {
@@ -2037,7 +2106,8 @@ function logPatchActionOn(ds, action) {
   saveState(); hydrateSettings(); renderAll();
   const a = assessPatch();
   const fallback = action === 'apply' ? 'Patch applied' : (action === 'detached' ? 'Fall-off logged — reapply or replace ASAP' : 'Patch removed');
-  const msg = (a && a.level !== 'ok') ? a.title : fallback;
+  const msg = opts && opts.skip ? 'Patch-free week skipped. New patch on, new cycle starts today.'
+    : (a && a.level !== 'ok') ? a.title : fallback;
   if (isNew) {
     toastUndo(msg, () => {
       document.querySelector('.site-modal')?.remove();
@@ -2195,7 +2265,8 @@ function showDayDetail(ds) {
   const appliedHere = acts.some((a) => a.action === 'apply');
   const removedHere = acts.some((a) => a.action === 'remove');
   const detachedHere = acts.some((a) => a.action === 'detached');
-  if (appliedHere) tags.push(tag('act-apply', 'Applied (logged)'));
+  const skippedHere = acts.some((a) => a.action === 'apply' && a.skip);
+  if (appliedHere) tags.push(tag('act-apply', skippedHere ? 'Applied, patch-free week skipped' : 'Applied (logged)'));
   if (removedHere) tags.push(tag('act-remove', 'Removed (logged)'));
   if (detachedHere) tags.push(tag('act-remove', 'Fell off (logged)'));
   for (const t of testsOn(ds)) tags.push(tag('test', `Test: ${TEST_LABELS[t.result].toLowerCase()}`));
@@ -2238,7 +2309,8 @@ function showDayDetail(ds) {
         <button class="btn btn-ghost btn-ic" data-act="${removedHere ? 'unremove' : 'remove'}" style="flex:1">${removedHere ? '✕ Undo removed' : ic('moon', 'var(--patchfree)', 'b-ic') + 'Removed patch'}</button>
         <button class="btn btn-ghost btn-ic" data-act="${detachedHere ? 'undetach' : 'detach'}" style="flex:1">${detachedHere ? '✕ Undo fell off' : ic('warn', 'var(--muted)', 'b-ic') + 'Fell off'}</button>
       </div>
-      ${appliedHere ? `<button class="link-btn" data-act="site" style="margin-top:8px">Placement: ${siteOf(ds) ? siteOf(ds).toLowerCase() : 'not set'} — change</button>` : ''}
+      ${canSkipOffWeek(ds) ? `<button class="btn btn-ghost btn-ic full" data-act="skipoff" style="margin-top:8px">${ic('bandage', 'var(--patch)', 'b-ic')}Skip patch-free week (apply new patch)</button>` : ''}
+      ${appliedHere ? `<button class="link-btn" data-act="site" style="margin-top:8px">Placement: ${siteOf(ds) ? siteOf(ds).toLowerCase() : 'not set'}, change</button>` : ''}
     </div>`;
   box.querySelector('#dFlow').addEventListener('click', (e) => {
     const b = e.target.closest('button'); if (!b) return;
@@ -2289,6 +2361,7 @@ function showDayDetail(ds) {
     showDayDetail(ds);
   });
   box.querySelector('[data-act="site"]')?.addEventListener('click', () => promptSiteFor(ds));
+  box.querySelector('[data-act="skipoff"]')?.addEventListener('click', () => { skipOffWeek(ds); showDayDetail(ds); });
 }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
@@ -2314,6 +2387,7 @@ function renderPatch() {
   $('#patchExpiry').value = state.settings.patchExpiry || '';
   renderChangeDay();
   const bmi = $('#bmiNote'); if (bmi) bmi.innerHTML = BMI_NOTE;
+  const sf = $('#skipFacts'); if (sf) sf.innerHTML = skipFactsHTML();
   const box = $('#patchSchedule'); box.innerHTML = '';
   // be upfront when the schedule has re-anchored to logged reality
   const anchor = cycleAnchor();
