@@ -579,11 +579,11 @@ function changeDayCorrection() {
 // A patch-free week you have planned to skip (settings.skipPlan holds the removal
 // date) becomes a new-patch day, and the next block starts from that day.
 const plannedSkips = () => state.settings.skipPlan || [];
-function patchEvents(weeks = 12) {
+function patchEvents(weeks = 12, plan) {
   const p = cycleAnchor();
   if (!p) return [];
   const horizon = addDays(today(), weeks * 7);
-  const planned = new Set(plannedSkips());
+  const planned = new Set(plan || plannedSkips());
   const events = [];
   let base = parseISO(p);
   let afterSkip = false;
@@ -609,6 +609,67 @@ function patchEvents(weeks = 12) {
   }
   return events;
 }
+/* "What if" for the calendar: compare the schedule with and without skipping the
+ * patch-free week that would start on `removeDate`. Nothing is saved. */
+function previewSkip(removeDate, weeks = 14) {
+  const base = plannedSkips().filter((d) => d !== removeDate);
+  const without = patchEvents(weeks, base);
+  const withSkip = patchEvents(weeks, [...base, removeDate]);
+  const nextBreak = (evs, after) => (evs.find((e) => e.type === 'remove' && e.date > after) || {}).date || null;
+  const uses = (evs) => evs.filter((e) => e.type === 'apply' || e.type === 'change');
+  const offset = (bleedTimingInsight() || {}).avg ?? 2;
+  const bleedOf = (d) => d ? iso(addDays(parseISO(d), offset)) : null;
+  const nb0 = nextBreak(without, removeDate), nb1 = nextBreak(withSkip, removeDate);
+  const horizon = iso(addDays(today(), weeks * 7));
+  const u0 = uses(without), u1 = uses(withSkip);
+  const patchesLeft = state.settings.patchesLeft;
+  const runOut = (u) => patchesLeft == null || patchesLeft >= u.length ? null : (u[patchesLeft] || {}).date || null;
+  return {
+    removeDate, without, withSkip,
+    changeWeekday: WEEKDAYS[parseISO(removeDate).getDay()],
+    skippedBreak: { from: removeDate, to: iso(addDays(parseISO(removeDate), 6)), bleed: bleedOf(removeDate) },
+    nextBreakWithout: nb0, nextBreakWith: nb1,
+    nextBleedWithout: bleedOf(nb0), nextBleedWith: bleedOf(nb1),
+    patchesWithout: u0.filter((e) => e.date <= horizon).length,
+    patchesWith: u1.filter((e) => e.date <= horizon).length,
+    runOutWithout: runOut(u0), runOutWith: runOut(u1),
+    weeks,
+  };
+}
+function renderSkipPreview() {
+  const sel = $('#skipPreviewSel'), out = $('#skipPreviewOut'); if (!sel || !out) return;
+  const breaks = patchEvents(16).filter((e) => e.skippable || e.skip);
+  const keep = sel.value;
+  sel.innerHTML = breaks.length
+    ? breaks.map((e) => `<option value="${e.date}">${fmtDate(e.date, { weekday: 'short', month: 'short', day: 'numeric' })}${e.skip ? ' (already planned)' : ''}</option>`).join('')
+    : '<option value="">Set your first-patch date first</option>';
+  if (keep && breaks.some((e) => e.date === keep)) sel.value = keep;
+  out.innerHTML = '';
+}
+function showSkipPreview() {
+  const d = $('#skipPreviewSel').value, out = $('#skipPreviewOut');
+  if (!d) { out.innerHTML = ''; return; }
+  const r = previewSkip(d);
+  const f = (x) => (x ? fmtDate(x, { weekday: 'short', month: 'short', day: 'numeric' }) : 'beyond this window');
+  const row = (e) => `<div class="ev"><span>${e.label.replace(' (planned: skip patch-free week)', ', skip')}</span><span class="ev-date">${fmtDate(e.date, { month: 'short', day: 'numeric' })}</span></div>`;
+  const shown = (evs) => evs.filter((e) => e.date >= d).slice(0, 7).map(row).join('');
+  const extra = r.patchesWith - r.patchesWithout;
+  const lines = [
+    `Patch-free week <b>${fmtDate(r.skippedBreak.from, { month: 'short', day: 'numeric' })} to ${fmtDate(r.skippedBreak.to, { month: 'short', day: 'numeric' })}</b> is skipped. No withdrawal bleed is expected around ${f(r.skippedBreak.bleed)}.`,
+    `You apply a new patch on <b>${f(r.removeDate)}</b> instead of removing one. Your change day stays <b>${r.changeWeekday}</b>.`,
+    `Your next patch-free week moves from <b>${f(r.nextBreakWithout)}</b> to <b>${f(r.nextBreakWith)}</b>, and the bleed that follows from about ${f(r.nextBleedWithout)} to about ${f(r.nextBleedWith)}.`,
+    `Over the next ${r.weeks} weeks you use <b>${r.patchesWith}</b> patches instead of ${r.patchesWithout}${extra > 0 ? `, ${extra} more` : ''}.`,
+  ];
+  if (r.runOutWith && r.runOutWith !== r.runOutWithout) {
+    lines.push(`With ${state.settings.patchesLeft} patch${state.settings.patchesLeft === 1 ? '' : 'es'} left, you would run out around <b>${f(r.runOutWith)}</b>${r.runOutWithout ? ` instead of ${f(r.runOutWithout)}` : ''}. Ask your prescriber for enough patches for extended use.`);
+  }
+  out.innerHTML = `<div class="skip-preview">${lines.map((l) => `<p class="small">${l}</p>`).join('')}
+    <div class="skip-cols"><div><h4>Without skipping</h4>${shown(r.without)}</div><div><h4>If you skip</h4>${shown(r.withSkip)}</div></div>
+    <button class="btn btn-ghost full" id="skipPreviewPlan">${plannedSkips().includes(d) ? 'Remove this planned skip' : 'Plan this skip'}</button>
+    <p class="muted small">This is only a preview. Planning it updates your schedule, and you still log the new patch on the day.</p></div>`;
+  $('#skipPreviewPlan').addEventListener('click', () => { togglePlannedSkip(d); showSkipPreview(); });
+}
+
 // Plan (or un-plan) skipping the patch-free week that would start on `removeDate`.
 function togglePlannedSkip(removeDate) {
   const plan = new Set(plannedSkips());
@@ -2408,6 +2469,7 @@ function renderPatch() {
   renderChangeDay();
   const bmi = $('#bmiNote'); if (bmi) bmi.innerHTML = BMI_NOTE;
   const sf = $('#skipFacts'); if (sf) sf.innerHTML = skipFactsHTML();
+  renderSkipPreview();
   const box = $('#patchSchedule'); box.innerHTML = '';
   // be upfront when the schedule has re-anchored to logged reality
   const anchor = cycleAnchor();
@@ -3289,3 +3351,5 @@ if ('serviceWorker' in navigator && !isNative) {
   await restoreFromFileIfNeeded();   // pull encrypted vault from iCloud on a fresh device
   showLock(!hasVault());
 })();
+
+$('#skipPreviewBtn')?.addEventListener('click', showSkipPreview);

@@ -478,3 +478,8 @@ main#views {
 .skip-facts, .skip-sources { margin: 6px 0 0; padding-left: 18px; }
 .skip-facts li, .skip-sources li { margin-bottom: 6px; }
 .skip-sources a { color: var(--patchfree); }
+.skip-preview { margin: 10px 0; }
+.skip-preview p { margin: 6px 0; }
+.skip-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
+.skip-cols h4 { margin: 0 0 4px; font-size: 13px; color: var(--muted); }
+#skipPreviewSel { width: 100%; }
